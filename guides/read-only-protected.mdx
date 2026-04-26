@@ -1,0 +1,97 @@
+---
+title: "Read-only and protected objects in vm2"
+description: "Use freeze(), readonly(), and protect() to control whether sandboxed code can modify host objects and their methods or properties."
+---
+
+When you pass host objects into a vm2 sandbox — either through the `sandbox` option or by returning them from methods — sandboxed code can, by default, modify those objects freely. vm2 provides three methods for restricting what sandboxed code can do with host objects: `freeze()`, `readonly()`, and `protect()`. All three are available on both `VM` and `NodeVM`.
+
+<Note>
+  These features are experimental. The behaviour is correct for the documented cases, but edge cases may exist in complex inheritance hierarchies or with proxied class instances.
+</Note>
+
+## freeze()
+
+`freeze()` makes a host object fully read-only inside the sandbox. Sandboxed code cannot add, change, or delete any properties on the frozen object, and the effect applies deeply across all nested objects.
+
+### Without freeze
+
+Without freezing, sandboxed code can mutate host objects directly:
+
+```javascript
+import { VM } from 'vm2';
+
+const util = {
+  add: (a, b) => a + b,
+};
+
+const vm = new VM({
+  sandbox: { util },
+});
+
+vm.run('util.add = (a, b) => a - b');
+console.log(util.add(1, 1)); // returns 0
+```
+
+### With freeze
+
+```javascript
+import { VM } from 'vm2';
+
+const util = {
+  add: (a, b) => a + b,
+};
+
+const vm = new VM(); // Objects specified in the sandbox cannot be frozen.
+vm.freeze(util, 'util'); // Second argument adds object to global scope.
+
+vm.run('util.add = (a, b) => a - b'); // Fails silently when not in strict mode.
+console.log(util.add(1, 1)); // returns 2
+```
+
+The optional second argument to `freeze(object, name)` adds the frozen object to the sandbox's global scope under the given name. If you omit the name, the object is frozen but not automatically accessible as a global variable.
+
+<Warning>
+  **IMPORTANT:** Objects that have already been proxied to the VM cannot be frozen. Call `freeze()` before passing the object into a sandbox.
+</Warning>
+
+## readonly()
+
+`readonly()` behaves identically to `freeze()` but does not accept a name argument, so it does not add the object to the global scope. Use it when you want to pass a frozen object to the sandbox through another mechanism (such as a sandbox method's return value):
+
+```javascript
+import { VM } from 'vm2';
+
+const config = { apiKey: 'secret', maxRetries: 3 };
+
+const vm = new VM();
+const frozenConfig = vm.readonly(config);
+
+// frozenConfig can now be passed to sandboxed code
+// without allowing modification
+```
+
+## protect()
+
+`protect()` allows sandboxed code to add or change data properties on an object, but prevents it from replacing any property with a function. This means sandboxed code cannot override methods like `toJSON`, `toString`, or `inspect`, which could otherwise be used to exfiltrate data or manipulate serialisation behaviour.
+
+```javascript
+import { VM } from 'vm2';
+
+const record = { id: 1, name: 'Alice' };
+
+const vm = new VM();
+vm.protect(record, 'record');
+
+vm.run('record.name = "Bob"');          // allowed — data property change
+vm.run('record.toJSON = () => "hacked"'); // blocked — cannot attach functions
+```
+
+Like `freeze()`, the second argument to `protect(object, name)` adds the object to the sandbox's global scope under the given name.
+
+<Warning>
+  **IMPORTANT:** Objects that have already been proxied to the VM cannot be protected. Call `protect()` before passing the object into a sandbox.
+</Warning>
+
+<Tip>
+  Use `freeze()` for configuration objects or constants that sandboxed code should read but never modify. Use `protect()` for data objects — like records or state containers — where you want to allow sandboxed code to update values but not inject or replace methods.
+</Tip>

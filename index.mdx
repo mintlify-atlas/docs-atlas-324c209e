@@ -1,133 +1,87 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "vm2: Secure JavaScript Sandbox for Node.js"
+description: "vm2 lets you run untrusted JavaScript safely inside your Node.js process using Proxy-based isolation and fine-grained module access controls."
 ---
 
-## Setting up
+vm2 is a sandbox library for Node.js that lets you execute untrusted JavaScript code inside the same process as your application. It uses a deep network of ES6 Proxies to intercept every interaction between sandboxed code and the host environment, providing fine-grained control over what the sandbox can see and do.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install vm2 and run your first sandboxed script in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Security Disclaimer" icon="shield-halved" href="/security-disclaimer">
+    Understand the security model and limitations before deploying.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="API Reference" icon="code" href="/api/vm">
+    Full reference for VM, NodeVM, VMScript, and all exports.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Security Guide" icon="lock" href="/security/overview">
+    Defensive design principles and best practices for safe sandbox use.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Choose your sandbox
 
-Everything you need to create world-class documentation.
+vm2 ships two sandbox classes suited to different use cases.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="VM" icon="square-terminal" href="/concepts/vm">
+    Synchronous execution without `require`. Ideal for expression evaluation, templating, and plugin logic where module loading is not needed.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="NodeVM" icon="node-js" href="/concepts/nodevm">
+    Full Node.js module environment with configurable `require` controls. Suitable for running complete scripts that need to load modules.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+</CardGroup>
 
-## Make your content agent ready
+## Key features
 
-Make your docs work for humans and AI agents alike.
+<CardGroup cols={2}>
+  <Card title="Module access control" icon="shield" href="/guides/module-access">
+    Allow or deny specific built-in and external modules. Mock any module with custom implementations.
+  </Card>
+  <Card title="Transpiler support" icon="arrows-rotate" href="/guides/transpiler-support">
+    Run TypeScript or CoffeeScript directly inside the sandbox using built-in compiler integration.
+  </Card>
+  <Card title="Read-only & protected objects" icon="eye" href="/guides/read-only-protected">
+    Freeze objects to prevent sandbox code from mutating host data, or protect objects to block function injection.
+  </Card>
+  <Card title="Error handling" icon="triangle-exclamation" href="/guides/error-handling">
+    Catch synchronous and asynchronous errors from sandboxed code using standard try/catch and event handlers.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
+## How vm2 works
 
-## Need inspiration?
+<Steps>
+  <Step title="Install">
+    Add vm2 to your project with your preferred package manager.
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    ```bash
+    npm install vm2
+    ```
+  </Step>
+  <Step title="Create a sandbox">
+    Instantiate `VM` or `NodeVM` with your security options.
+
+    ```javascript
+    import { VM } from 'vm2';
+
+    const vm = new VM({
+      timeout: 1000,
+      allowAsync: false,
+    });
+    ```
+  </Step>
+  <Step title="Run untrusted code">
+    Pass code strings or precompiled `VMScript` objects to `vm.run()`.
+
+    ```javascript
+    const result = vm.run('1 + 1'); // 2
+    vm.run('process.exit()');       // Throws ReferenceError: process is not defined
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  vm2 provides in-process sandboxing, not OS-level isolation. Read the [Security Disclaimer](/security-disclaimer) before using vm2 with untrusted code from unknown sources.
+</Warning>

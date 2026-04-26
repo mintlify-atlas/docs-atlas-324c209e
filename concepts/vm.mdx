@@ -1,0 +1,201 @@
+---
+title: 'VM: Synchronous Sandboxed Code Execution'
+description: 'Run untrusted JavaScript synchronously in an isolated context. VM exposes only JS built-ins and Buffer — no require, no process, no timers.'
+---
+
+`VM` is the simpler of vm2's two sandbox classes. It runs code synchronously in an isolated V8 context where only JavaScript built-in objects and Node's `Buffer` are available. There is no `require`, no `process`, and no scheduling functions (`setInterval`, `setTimeout`, `setImmediate`) unless you explicitly inject them through the `sandbox` option. Use `VM` when you need to evaluate expressions, run template logic, or execute short synchronous scripts from a relatively trusted source without giving that code access to Node's module system.
+
+## Options
+
+<ParamField body="timeout" type="number">
+  Script timeout in milliseconds. Only effective on synchronous code you pass directly to `run()`. See the timeout limitation note below.
+</ParamField>
+
+<ParamField body="sandbox" type="object">
+  An object whose properties are copied into the sandbox's global scope. Sandboxed code can read and write these values as global variables.
+</ParamField>
+
+<ParamField body="compiler" type="string | CompilerFunction" default="javascript">
+  The compiler to use before executing code. Built-in values: `"javascript"`, `"typescript"`, `"coffeescript"`. You can also pass a custom `(code: string, filename: string) => string` function. The `typescript` and `coffeescript` options require the corresponding package to be installed in the host.
+</ParamField>
+
+<ParamField body="eval" type="boolean" default="true">
+  When `false`, any call to `eval()` or dynamic function constructors (`Function`, `GeneratorFunction`, etc.) inside the sandbox throws an `EvalError`.
+</ParamField>
+
+<ParamField body="wasm" type="boolean" default="true">
+  When `false`, any attempt to compile a WebAssembly module inside the sandbox throws a `WebAssembly.CompileError`. Note: `WebAssembly.JSTag` is always removed inside the sandbox regardless of this setting, so wasm code cannot catch JavaScript exceptions.
+</ParamField>
+
+<ParamField body="allowAsync" type="boolean" default="true">
+  When `false`, any attempt to run code using `async`/`await` throws a `VMError`. Combine with `timeout` to prevent infinite loops in synchronous code.
+</ParamField>
+
+## Timeout limitation
+
+<Warning>
+  `timeout` only applies to synchronous code executed directly via `vm.run()`. It does **not** apply to methods or callbacks returned from the sandbox. If you act on a returned object (including logging it or building an error message from it), that can run arbitrary sandboxed code outside the timeout window. Always verify a returned value is a primitive with `typeof` before using it, and discard non-primitive results if the timeout constraint matters.
+</Warning>
+
+## Available globals
+
+Only JavaScript built-ins and `Buffer` are available inside a `VM` sandbox by default. The following are absent unless you add them via `sandbox`:
+
+- `process` — not available
+- `require` — not available
+- `setInterval` / `setTimeout` / `setImmediate` — not available
+- Any Node.js module — not available
+
+This is the key difference from `NodeVM`, which provides a full Node-like module environment.
+
+## Basic usage
+
+```javascript vm-basic.js
+import { VM } from 'vm2';
+
+const vm = new VM({
+  timeout: 1000,
+  allowAsync: false,
+  sandbox: {},
+});
+
+vm.run('process.exit()'); // throws ReferenceError: process is not defined
+```
+
+### Retrieving values
+
+`run()` returns the result of the last expression in the script:
+
+```javascript vm-values.js
+import { VM } from 'vm2';
+
+const vm = new VM();
+let number = vm.run('1337'); // returns 1337
+```
+
+### Blocking dangerous globals
+
+vm2's proxy layer blocks attempts to escape the sandbox through prototype chains:
+
+```javascript vm-escape-attempt.js
+import { VM } from 'vm2';
+
+// Node's built-in vm module is vulnerable to this pattern:
+// runInNewContext('this.constructor.constructor("return process")().exit()');
+
+// vm2 blocks it:
+new VM().run('this.constructor.constructor("return process")().exit()');
+// Throws ReferenceError: process is not defined
+```
+
+## Cross-sandbox relationships
+
+Objects passed through `sandbox` retain their identity across the host/sandbox boundary. A sandboxed script that reads back an object you provided will receive a reference equal to the original host object:
+
+```javascript cross-sandbox.js
+const assert = require('assert');
+const { VM } = require('vm2');
+
+const sandbox = {
+  object: new Object(),
+  func: new Function(),
+  buffer: new Buffer([0x01, 0x05]),
+};
+
+const vm = new VM({ sandbox });
+
+assert.ok(vm.run(`object`) === sandbox.object);
+assert.ok(vm.run(`object instanceof Object`));
+assert.ok(vm.run(`object`) instanceof Object);
+assert.ok(vm.run(`object.__proto__ === Object.prototype`));
+assert.ok(vm.run(`object`).__proto__ === Object.prototype);
+
+assert.ok(vm.run(`func`) === sandbox.func);
+assert.ok(vm.run(`func instanceof Function`));
+assert.ok(vm.run(`func`) instanceof Function);
+assert.ok(vm.run(`func.__proto__ === Function.prototype`));
+assert.ok(vm.run(`func`).__proto__ === Function.prototype);
+
+assert.ok(vm.run(`new func() instanceof func`));
+assert.ok(vm.run(`new func()`) instanceof sandbox.func);
+assert.ok(vm.run(`new func().__proto__ === func.prototype`));
+assert.ok(vm.run(`new func()`).__proto__ === sandbox.func.prototype);
+
+assert.ok(vm.run(`buffer`) === sandbox.buffer);
+assert.ok(vm.run(`buffer instanceof Buffer`));
+assert.ok(vm.run(`buffer`) instanceof Buffer);
+assert.ok(vm.run(`buffer.__proto__ === Buffer.prototype`));
+assert.ok(vm.run(`buffer`).__proto__ === Buffer.prototype);
+assert.ok(vm.run(`buffer.slice(0, 1) instanceof Buffer`));
+assert.ok(vm.run(`buffer.slice(0, 1)`) instanceof Buffer);
+```
+
+## Methods
+
+### `run(code, options?)`
+
+Runs a string or precompiled `VMScript` inside the sandbox. Returns the value of the last expression. Applies `timeout` if set.
+
+```typescript
+run(script: string | VMScript, options?: string | { filename?: string }): any
+```
+
+### `runFile(filename)`
+
+Reads a file from disk and runs its contents in the sandbox. Equivalent to `run(fs.readFileSync(filename), filename)`.
+
+```typescript
+runFile(filename: string): any
+```
+
+### `setGlobals(values)`
+
+Copies all own properties of `values` into the sandbox global object. Returns `this` for chaining.
+
+```typescript
+setGlobals(values: any): this
+```
+
+### `setGlobal(name, value)`
+
+Sets a single global variable in the sandbox by name. Returns `this` for chaining.
+
+```typescript
+setGlobal(name: string, value: any): this
+```
+
+### `getGlobal(name)`
+
+Reads a global variable from the sandbox by name.
+
+```typescript
+getGlobal(name: string): any
+```
+
+### `freeze(object, name?)`
+
+Marks `object` as read-only inside the sandbox. Sandboxed code cannot add, change, or delete its properties. Optionally registers the object as a global under `name`. See [Read-only and protected objects](/guides/read-only-protected) for details.
+
+```typescript
+freeze(object: any, name?: string): any
+```
+
+### `readonly(object)`
+
+Lower-level version of `freeze`. Marks the object read-only without registering it as a global.
+
+```typescript
+readonly(object: any): any
+```
+
+### `protect(object, name?)`
+
+Marks `object` so that sandboxed code cannot attach functions as its properties, preventing modification of methods like `toJSON` or `toString`. Optionally registers it as a global under `name`. See [Read-only and protected objects](/guides/read-only-protected) for details.
+
+```typescript
+protect(object: any, name?: string): any
+```
+
+<Note>
+  `freeze()` and `protect()` cannot be applied to objects that have already been proxied into the VM. Call these methods before passing an object into the sandbox.
+</Note>

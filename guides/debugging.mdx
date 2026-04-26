@@ -1,0 +1,88 @@
+---
+title: "Debugging code inside a vm2 sandbox"
+description: "Use breakpoints, the debugger keyword, and step-in to debug sandboxed code running inside a vm2 VM or NodeVM with Node's inspector."
+---
+
+Because vm2 uses Node's built-in `vm` module to create sandboxed execution contexts, the V8 inspector protocol works inside sandboxed code exactly as it does in regular Node.js scripts. You can set breakpoints, use the `debugger` keyword, and step into sandboxed functions from the host — as long as you provide a filename.
+
+## How debugging works
+
+vm2 compiles scripts using Node's `vm.Script`, which participates in the V8 debugger protocol. When you attach a debugger (via `--inspect` or `--inspect-brk`), the inspector sees sandboxed scripts as separate source files, provided you supply a filename. Without a filename, the script appears in the debugger but has a synthetic identifier that may make navigation harder.
+
+## Breakpoints
+
+To use breakpoints in sandboxed code, pass a filename to `VMScript`. The debugger uses this filename to display and track the source:
+
+```javascript
+import { VM, VMScript } from 'vm2';
+import { readFileSync } from 'node:fs';
+
+const file = `${__dirname}/sandbox.js`;
+
+// By providing a file name as second argument you enable breakpoints
+const script = new VMScript(readFileSync(file), file);
+
+new VM().run(script);
+```
+
+Set breakpoints in your IDE or the Chrome DevTools sources panel at the file path you provided. When the script runs, execution pauses at the breakpoint just as it would for host code.
+
+## debugger keyword
+
+The `debugger` statement works inside sandbox code regardless of whether you provide a filename. When a debugger is attached, execution pauses on the `debugger` line:
+
+```javascript
+// sandbox.js
+const foo = 'ahoj';
+
+// The debugger keyword works just fine everywhere.
+// Even without specifying a file name to the VMScript object.
+debugger;
+```
+
+## Step-in
+
+You can step into sandboxed code from the host using the step-in command in any V8-compatible debugger. This works because the sandbox shares the same V8 instance and isolate as the host process.
+
+## Complete example
+
+The following two-file setup demonstrates breakpoints in practice. Run `main.js` with `node --inspect-brk main.js` and attach a debugger.
+
+**`/tmp/main.js`**
+
+```javascript
+import { VM, VMScript } from 'vm2';
+import { readFileSync } from 'node:fs';
+
+const file = `${__dirname}/sandbox.js`;
+
+// By providing a file name as second argument you enable breakpoints
+const script = new VMScript(readFileSync(file), file);
+
+new VM().run(script);
+```
+
+**`/tmp/sandbox.js`**
+
+```javascript
+const foo = 'ahoj';
+
+// The debugger keyword works just fine everywhere.
+// Even without specifying a file name to the VMScript object.
+debugger;
+```
+
+## Stack traces
+
+When an error is thrown inside the sandbox, the stack trace reflects the filename you provided to `VMScript` or `vm.run()`. Without a filename, the trace shows a synthetic identifier. With a filename, the trace is readable and points directly to the offending line:
+
+```
+Error: something went wrong
+    at Object.<anonymous> (/tmp/sandbox.js:3:7)
+    at VM.run (/node_modules/vm2/lib/vm.js:...)
+    at Object.<anonymous> (/tmp/main.js:8:10)
+```
+
+<Tip>
+  Always provide a filename when constructing `VMScript` or calling `vm.run()`. It costs nothing, enables breakpoints, and makes stack traces from sandboxed errors far easier to diagnose.
+</Tip>

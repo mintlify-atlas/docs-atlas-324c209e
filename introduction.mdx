@@ -1,0 +1,85 @@
+---
+title: "Introduction to vm2: JavaScript sandbox for Node.js"
+description: "vm2 runs untrusted JavaScript inside your Node.js process using Proxy-based isolation, with fine-grained control over modules and the sandbox environment."
+---
+
+vm2 is a Node.js library for running untrusted JavaScript inside the same process as your application. Rather than spawning a child process or container, vm2 keeps execution in-process and uses a deep network of ES6 Proxies to intercept every interaction between sandboxed code and the host environment. This makes it fast and tightly integrated with your code, while blocking the most common escape routes that Node's built-in `vm` module leaves open.
+
+## What is vm2?
+
+vm2 creates an isolated execution context — a sandbox — inside your Node.js process. Code running in the sandbox sees a restricted global environment, cannot access `process`, `require`, or host objects unless you explicitly expose them, and cannot call dangerous built-ins without going through vm2's proxy layer.
+
+The core mechanism is V8 Proxies. Every value that crosses the boundary between sandbox and host is wrapped in a proxy that enforces your configured policy. When sandboxed code tries to reach a host constructor, traverse a prototype chain, or call a restricted function, the proxy intercepts the attempt and either blocks it or returns a safe, sandboxed equivalent.
+
+vm2 also overrides the built-in `require` inside `NodeVM` sandboxes, so you can control exactly which built-in and external modules sandboxed code is allowed to load.
+
+## VM vs NodeVM
+
+vm2 exports two sandbox classes with different trade-offs:
+
+| | `VM` | `NodeVM` |
+|---|---|---|
+| **Module loading** | Not available | Available via configurable `require` |
+| **Execution model** | Synchronous only | Synchronous and asynchronous |
+| **Timeout support** | Yes (`timeout` option) | No |
+| **Sandbox scope** | JavaScript built-ins + `Buffer` | Full Node.js module environment |
+| **Use case** | Expression evaluation, plugins, templates | Running complete scripts that need modules |
+
+Use `VM` when you want a tight, simple sandbox for evaluating expressions or running small snippets that don't need to load modules. Use `NodeVM` when sandboxed code needs to `require` built-ins or external packages, or when you need to export functions back to the host.
+
+## How vm2 differs from Node's built-in vm
+
+Node's `vm` module creates a new context, but it does not prevent sandbox code from reaching back into the host process through the prototype chain. This well-known escape works against the built-in `vm`:
+
+```javascript
+import { runInNewContext } from "node:vm";
+
+runInNewContext('this.constructor.constructor("return process")().exit()');
+console.log('Never gets executed.');
+```
+
+vm2 blocks this path entirely:
+
+```javascript
+import { VM } from 'vm2';
+
+new VM().run('this.constructor.constructor("return process")().exit()');
+// Throws ReferenceError: process is not defined
+```
+
+The difference is the proxy layer. vm2 wraps every object crossing the sandbox boundary, so `this.constructor` inside the sandbox resolves to the sandboxed `Object` constructor — not the host one.
+
+## Features
+
+<CardGroup cols={2}>
+  <Card title="In-process sandboxing" icon="shield">
+    Runs untrusted code in the same Node.js process with fast, synchronous communication between sandbox and host.
+  </Card>
+  <Card title="Proxy-based isolation" icon="lock">
+    ES6 Proxies intercept every object crossing the sandbox boundary, blocking prototype chain escapes and constructor access.
+  </Card>
+  <Card title="Module access control" icon="sliders">
+    Allowlist built-in and external modules, restrict require paths, or mock any module with a custom implementation.
+  </Card>
+  <Card title="Console control" icon="terminal">
+    Inherit the host console, redirect console output to event handlers, or disable it entirely.
+  </Card>
+  <Card title="Precompiled scripts" icon="bolt">
+    Use `VMScript` to compile code once and run it many times across different sandbox instances.
+  </Card>
+  <Card title="Transpiler support" icon="arrows-rotate">
+    Run TypeScript or CoffeeScript directly in the sandbox with built-in compiler integration.
+  </Card>
+  <Card title="Read-only objects" icon="eye">
+    Freeze host objects before passing them to the sandbox to prevent mutation.
+  </Card>
+  <Card title="Actively maintained" icon="wrench">
+    Security vulnerabilities are patched as they are reported and disclosed responsibly.
+  </Card>
+</CardGroup>
+
+## Security limitations
+
+vm2 provides in-process sandboxing, not OS or process-level isolation. Despite its proxy layer, new escape techniques continue to be discovered and patched. You should not rely on vm2 as your only line of defense when running code from completely untrusted sources.
+
+Read the [security disclaimer](/security-disclaimer) before deploying vm2 in production.

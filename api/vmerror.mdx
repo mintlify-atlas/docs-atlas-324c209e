@@ -1,0 +1,132 @@
+---
+title: "VMError class reference"
+description: "API reference for VMError in vm2. Covers all trigger conditions, how to catch and identify policy violations, and distinguishing them from runtime errors."
+---
+
+`VMError` extends the standard `Error` class and is thrown by vm2 whenever the sandbox policy is violated by user code or by an invalid configuration. Because it is a plain subclass of `Error`, all standard error-handling patterns — `try`/`catch`, `instanceof` checks, `error.message`, and `error.stack` — work as expected.
+
+## Class signature
+
+```typescript
+class VMError extends Error {}
+```
+
+`VMError` does not add any new properties or methods beyond those inherited from `Error`. Its distinguishing characteristic is its class identity, which lets you catch only vm2 policy violations while allowing other error types to propagate.
+
+---
+
+## When VMError is thrown
+
+### Async code blocked by `allowAsync: false`
+
+When `allowAsync` is `false` (or the deprecated `fixAsync` is `true`), any attempt to use `async`/`await` or return a `Promise` throws `VMError`.
+
+```javascript
+import { VM } from 'vm2';
+
+const vm = new VM({ allowAsync: false });
+
+try {
+  vm.run('async function f() {}; f()');
+} catch (err) {
+  console.log(err instanceof VMError); // true
+  console.log(err.message); // "Async not available"
+}
+```
+
+### `eval` disabled (`eval: false`)
+
+When `eval` is `false`, calling `eval()` or any function constructor (`Function`, `GeneratorFunction`, etc.) inside the sandbox throws an `EvalError` — **not** a `VMError`. Handle `EvalError` separately if needed.
+
+### WebAssembly disabled (`wasm: false`)
+
+When `wasm` is `false`, attempting to compile a WebAssembly module throws `WebAssembly.CompileError` — again, **not** a `VMError`.
+
+### VM construction errors
+
+`VMError` is thrown during construction of a `VM` or `NodeVM` when:
+
+- `options.sandbox` is not an object: `"Sandbox must be object."`
+- An unknown compiler name is provided to `lookupCompiler`.
+
+### Nesting disabled
+
+When `nesting` is `false` (the default), sandbox code attempting to require the internal `vm2` module receives a `VMError`.
+
+### runFile() on a missing or invalid path
+
+`VM.runFile()` and `NodeVM.file()` throw `VMError` when the target path does not exist or is a directory.
+
+---
+
+## Catching VMError
+
+```javascript
+import { VM, VMError } from 'vm2';
+
+const vm = new VM({ allowAsync: false });
+
+try {
+  vm.run(untrustedCode);
+} catch (err) {
+  if (err instanceof VMError) {
+    // Policy violation — log and reject the submission
+    console.warn('Sandbox policy violation:', err.message);
+  } else if (err instanceof SyntaxError) {
+    // Syntax error in the submitted code
+    console.warn('Syntax error:', err.message);
+  } else {
+    // Runtime error thrown by the sandboxed code itself
+    throw err;
+  }
+}
+```
+
+<Note>
+`VMError` extends `Error`, so `err instanceof Error` is also `true` for `VMError` instances. Use `err instanceof VMError` for precise matching.
+</Note>
+
+---
+
+## Code example: combining all error types
+
+```javascript
+import { VM, VMScript, VMError } from 'vm2';
+
+const vm = new VM({
+  timeout: 1000,
+  allowAsync: false,
+  eval: false,
+});
+
+function runSafe(code) {
+  let script;
+
+  // Catch syntax errors at compile time
+  try {
+    script = new VMScript(code).compile();
+  } catch (err) {
+    return { ok: false, reason: 'syntax', message: err.message };
+  }
+
+  // Catch policy violations and runtime errors at run time
+  try {
+    const result = vm.run(script);
+    return { ok: true, result };
+  } catch (err) {
+    if (err instanceof VMError) {
+      return { ok: false, reason: 'policy', message: err.message };
+    }
+    return { ok: false, reason: 'runtime', message: err.message };
+  }
+}
+
+console.log(runSafe('1 + 1'));
+// { ok: true, result: 2 }
+
+console.log(runSafe('async function f() {}'));
+// { ok: false, reason: 'policy', message: 'Async not available' }
+
+console.log(runSafe('function('));
+// { ok: false, reason: 'syntax', message: "Unexpected token ')'" }
+```

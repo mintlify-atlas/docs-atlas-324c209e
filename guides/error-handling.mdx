@@ -1,0 +1,104 @@
+---
+title: "Handling errors from sandboxed code"
+description: "Catch compilation errors, runtime exceptions, and async errors thrown by code running inside a vm2 VM or NodeVM sandbox, including VMError."
+---
+
+Errors from sandboxed code surface in two ways depending on whether the code is synchronous or asynchronous. Synchronous errors — including syntax errors during compilation and runtime exceptions — can be caught with a standard `try/catch` block. Asynchronous errors require an `uncaughtException` handler on Node's `process` object.
+
+## Synchronous errors
+
+Wrap both script compilation and `vm.run()` calls in `try/catch` to handle errors from synchronous code:
+
+```javascript
+import { VM, VMScript } from 'vm2';
+
+const vm = new VM();
+
+try {
+  var script = new VMScript('Math.random()').compile();
+} catch (err) {
+  console.error('Failed to compile script.', err);
+}
+
+try {
+  vm.run(script);
+} catch (err) {
+  console.error('Failed to execute script.', err);
+}
+```
+
+Compilation errors are thrown when `VMScript.compile()` is called, or lazily on the first `vm.run()` if you skip the explicit compile step. Runtime errors are thrown from `vm.run()` itself.
+
+## VMError
+
+`VMError` is thrown when sandboxed code violates a policy enforced by vm2 itself — not when the sandboxed code throws its own error. Common causes include:
+
+- Calling `eval()` or `Function()` when `eval: false` is set
+- Using `async`/`await` when `allowAsync: false` is set
+- Attempting to compile a WebAssembly module when `wasm: false` is set
+- Requiring a module that is not on the allowlist
+
+```javascript
+import { VM, VMError } from 'vm2';
+
+const vm = new VM({ eval: false });
+
+try {
+  vm.run('eval("1 + 1")');
+} catch (err) {
+  if (err instanceof VMError) {
+    console.error('Policy violation:', err.message);
+  } else {
+    console.error('Sandbox runtime error:', err);
+  }
+}
+```
+
+## Asynchronous errors
+
+Errors thrown inside asynchronous sandboxed code — including unhandled Promise rejections that reach Node's event loop — are not catchable with `try/catch` around `vm.run()`. Handle them by listening to the `uncaughtException` event on the host `process`:
+
+```javascript
+process.on('uncaughtException', err => {
+  console.error('Asynchronous error caught.', err);
+});
+```
+
+## Async errors with NodeVM
+
+`NodeVM` supports async module exports. When an async function exported from the sandbox rejects without being caught, the error propagates as an unhandled rejection and eventually surfaces via `uncaughtException` (or `unhandledRejection`):
+
+```javascript
+import { NodeVM } from 'vm2';
+
+process.on('uncaughtException', err => {
+  console.error('Asynchronous error caught.', err);
+});
+
+const vm = new NodeVM({ require: { external: true } });
+
+const asyncFn = vm.run(`
+  module.exports = async function() {
+    throw new Error('async failure');
+  }
+`);
+
+asyncFn(); // Error surfaces via uncaughtException
+```
+
+## Error identity across the sandbox boundary
+
+Errors thrown inside the sandbox are proxied objects when they cross the sandbox boundary. This means that `instanceof Error` checks on caught errors may not behave as expected in all cases. Inspect the `message` and `stack` properties directly rather than relying on `instanceof`:
+
+```javascript
+try {
+  vm.run('throw new TypeError("bad input")');
+} catch (err) {
+  console.error(err.message); // "bad input"
+  console.error(err.stack);   // Stack trace reflecting sandbox filename
+}
+```
+
+<Tip>
+  Always wrap `vm.run()` in a `try/catch` to handle synchronous errors, and always register a `process.on('uncaughtException', ...)` handler to catch asynchronous errors from sandboxed code. If you use `NodeVM` with async module exports, also handle `unhandledRejection`.
+</Tip>

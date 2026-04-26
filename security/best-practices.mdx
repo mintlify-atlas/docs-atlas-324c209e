@@ -1,0 +1,211 @@
+---
+title: "Best practices for safe vm2 usage"
+description: "Configuration and operational guidance for reducing sandbox escape risk, including module restrictions, timeout settings, and defense-in-depth strategies."
+---
+
+Running vm2 safely requires more than installing the package and calling `vm.run()`. Because vm2 sandboxes code inside the same process, every option you configure either narrows or widens the attack surface available to untrusted code. The practices below come directly from the project's documented behavior and known escape patterns. Apply as many as your use case allows — each one removes a capability that an attacker would otherwise have.
+
+## Keep vm2 updated
+
+New escape paths are discovered regularly. A version that was safe when you first deployed it may have a known bypass today.
+
+<Warning>
+  Subscribe to [GitHub security advisories](https://github.com/patriksimek/vm2/security/advisories) for the vm2 repository. Run `npm audit` in your project regularly. Treat vm2 version updates as security-critical patches, not routine maintenance.
+</Warning>
+
+## Defense in depth
+
+vm2 should not be your only line of defense. Combine it with OS-level restrictions and monitoring:
+
+- Run your application in a container or with reduced OS privileges so that even a successful escape has limited reach.
+- Apply network egress filtering to prevent exfiltration via `http` or `child_process`.
+- Set filesystem restrictions so that even if `require('fs')` is exposed, accessible paths are limited.
+- Monitor for abnormal process behavior (unexpected child processes, unexpected network connections).
+
+```javascript
+import { VM } from 'vm2';
+
+// vm2 is one layer — the process itself should also be constrained.
+const vm = new VM({
+  timeout: 1000,
+  allowAsync: false,
+  eval: false,
+  wasm: false,
+  sandbox: {},
+});
+```
+
+## Limit module access
+
+Every built-in or external module you allow into the sandbox is a new attack surface. Only allow what your sandboxed code actually needs.
+
+<Warning>
+  `builtin: ["*"]` allows all current and future built-in modules. New built-ins added in future Node.js versions will be automatically permitted. Do not use the wildcard unless you have no alternative.
+</Warning>
+
+```javascript
+import { NodeVM } from 'vm2';
+
+// Prefer an explicit allowlist over a wildcard.
+const vm = new NodeVM({
+  require: {
+    builtin: ['path'],       // only what is needed
+    external: false,         // no external npm modules
+    root: './sandbox-data',  // restrict local requires to one directory
+  },
+});
+```
+
+```javascript
+import { NodeVM } from 'vm2';
+
+// Avoid this:
+const vm = new NodeVM({
+  require: {
+    builtin: ['*'],    // allows child_process, fs, net, and everything else
+    external: true,   // allows any installed npm package
+  },
+});
+```
+
+## Set timeout and disable async for synchronous workloads
+
+If the code you are running does not need to be asynchronous, disabling it removes the entire class of async-based escape paths.
+
+<Note>
+  `timeout` only applies to the synchronous code passed directly to `vm.run()`. It does not apply to methods returned from the sandbox. Combine it with `allowAsync: false` to prevent long-running async callbacks from bypassing the timeout.
+</Note>
+
+```javascript
+import { VM } from 'vm2';
+
+const vm = new VM({
+  timeout: 500,         // 500 ms limit on vm.run() calls
+  allowAsync: false,    // throws VMError if sandbox code uses async/await or Promises
+});
+
+vm.run('/* synchronous sandbox code */');
+```
+
+## Disable eval if not needed
+
+`eval` and the `Function` constructor allow sandbox code to compile new strings as code at runtime. Disabling them removes an entire class of dynamic code generation.
+
+```javascript
+import { VM } from 'vm2';
+
+const vm = new VM({
+  eval: false,   // eval(), Function(), GeneratorFunction(), etc. throw EvalError
+});
+
+vm.run('eval("1+1")');
+// EvalError: Code generation from strings disallowed for this context
+```
+
+## Disable WebAssembly if not needed
+
+WebAssembly modules can execute arbitrary binary code. Unless your sandbox explicitly requires Wasm, disable it.
+
+```javascript
+import { VM } from 'vm2';
+
+const vm = new VM({
+  wasm: false,   // WebAssembly.compile() and WebAssembly.instantiate() throw
+});
+```
+
+<Info>
+  Even with `wasm: true`, `WebAssembly.JSTag` is removed inside the sandbox for security reasons, so Wasm code cannot catch JavaScript exceptions.
+</Info>
+
+## Avoid enabling nesting
+
+`nesting: true` allows sandboxed code to create its own `NodeVM` instances. A nested `NodeVM` can call `require` with its own options, potentially requiring host modules that the outer sandbox forbids.
+
+```javascript
+import { NodeVM } from 'vm2';
+
+// Avoid this unless you have a specific, justified reason.
+const vm = new NodeVM({
+  nesting: true,   // sandboxed code can create its own NodeVM with require: { builtin: ['*'] }
+});
+```
+
+<Warning>
+  `nesting: true` is documented as a security risk. Scripts inside the sandbox can create a `NodeVM` that requires any host module.
+</Warning>
+
+## Be careful with require.context: "sandbox"
+
+When `require.context` is set to `"sandbox"`, required modules are loaded, compiled, and executed inside the sandbox. Transitive dependencies of those modules are also loaded in the sandbox.
+
+```javascript
+import { NodeVM } from 'vm2';
+
+const vm = new NodeVM({
+  require: {
+    external: ['lodash'],
+    // context defaults to 'host' — modules are required in the host and proxied in.
+    // context: 'sandbox' — modules run inside the sandbox, including their dependencies.
+  },
+});
+```
+
+<Warning>
+  When a module is required transitively with `require.external.transitive: true`, any subsequent code in the sandbox can also require that module — even if it was not on the original allowlist. Transitive module loading expands the available attack surface in ways that are difficult to predict.
+</Warning>
+
+## Freeze shared objects before passing them to the sandbox
+
+Objects passed to the sandbox via the `sandbox` option can be mutated unless you freeze them first. Mutating shared host objects is an easy way for sandbox code to affect host behavior.
+
+```javascript
+import { VM } from 'vm2';
+
+const util = {
+  add: (a, b) => a + b,
+};
+
+// Without freeze, sandbox code can overwrite util.add.
+const vmUnsafe = new VM({ sandbox: { util } });
+vmUnsafe.run('util.add = (a, b) => a - b');
+console.log(util.add(1, 1)); // returns 0 — sandbox mutated the host object
+
+// With freeze, the assignment fails silently (or throws in strict mode).
+const vmSafe = new VM();
+vmSafe.freeze(util, 'util');
+vmSafe.run('util.add = (a, b) => a - b');
+console.log(util.add(1, 1)); // returns 2 — host object is unchanged
+```
+
+<Note>
+  `vm.freeze()` must be called before the object is proxied to the VM. It is not possible to freeze objects that have already been proxied.
+</Note>
+
+## Validate returned values before using them
+
+The `timeout` option documentation makes this explicit: operating on returned objects from the sandbox can run arbitrary code. Always check `typeof` before passing a returned value to host functions.
+
+```javascript
+import { VM } from 'vm2';
+
+const vm = new VM({ timeout: 1000, allowAsync: false });
+
+const result = vm.run('/* some computation */');
+
+// Check the type before using the value.
+if (typeof result !== 'string' && typeof result !== 'number' && typeof result !== 'boolean') {
+  throw new Error('Unexpected non-primitive returned from sandbox');
+}
+
+// Safe to use as a primitive.
+console.log(result);
+```
+
+<Warning>
+  Do not pass returned sandbox objects to host functions like `JSON.stringify`, `console.log`, or string concatenation without verifying they are primitives. These operations can invoke sandbox code (via `.toString()`, `.toJSON()`, etc.) after the `timeout` has already expired.
+</Warning>
+
+## Reporting vulnerabilities
+
+If you discover a security issue in vm2, do not open a public GitHub issue. Use [GitHub's private vulnerability reporting](https://github.com/patriksimek/vm2/security/advisories/new) to submit your report confidentially. See the [SECURITY.md](https://github.com/patriksimek/vm2/blob/resurrection/SECURITY.md) file for the full disclosure policy and supported versions.

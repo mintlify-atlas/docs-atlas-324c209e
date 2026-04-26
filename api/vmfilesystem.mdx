@@ -1,0 +1,252 @@
+---
+title: "VMFileSystem class reference"
+description: "API reference for VMFileSystem in vm2. Covers VMFS and VMPath interfaces, constructor options, all methods, and examples for custom and restricted filesystems."
+---
+
+`VMFileSystem` implements `VMFileSystemInterface` and provides the sandbox module resolver with a controlled view of the host filesystem. By supplying a custom `VMFileSystem` (or any object implementing `VMFileSystemInterface`) via `require.fs` in `NodeVMOptions`, you can intercept or restrict every filesystem operation the resolver performs — from reading source files to resolving module paths.
+
+<Note>
+The default resolver uses Node's built-in `fs` and `path` modules. You only need `VMFileSystem` when you want to substitute custom implementations, such as an in-memory filesystem, a virtual path mapper, or a read-only overlay.
+</Note>
+
+## Interfaces
+
+### VMFileSystemInterface
+
+The full interface the resolver expects. `VMFileSystem` implements this interface. You can implement it directly without extending `VMFileSystem`.
+
+```typescript
+interface VMFileSystemInterface extends VMFS, VMPath {
+  isSeparator(char: string): boolean;
+}
+```
+
+### VMFS
+
+```typescript
+interface VMFS {
+  statSync: typeof fs.statSync;
+  readFileSync: typeof fs.readFileSync;
+}
+```
+
+<ParamField body="statSync" type="typeof fs.statSync">
+  Returns file status information. Used to check whether a path exists and whether it is a file or directory. Must match the signature of Node's `fs.statSync`.
+</ParamField>
+
+<ParamField body="readFileSync" type="typeof fs.readFileSync">
+  Reads the contents of a file. Used by the resolver to load module source code. Must match the signature of Node's `fs.readFileSync`.
+</ParamField>
+
+### VMPath
+
+```typescript
+interface VMPath {
+  resolve: typeof pa.resolve;
+  isAbsolute: typeof pa.isAbsolute;
+  join: typeof pa.join;
+  basename: typeof pa.basename;
+  dirname: typeof pa.dirname;
+}
+```
+
+<ParamField body="resolve" type="typeof path.resolve">
+  Resolves a sequence of path segments into an absolute path. Used to normalize module paths.
+</ParamField>
+
+<ParamField body="isAbsolute" type="typeof path.isAbsolute">
+  Returns `true` if `path` is an absolute path. Used during module resolution.
+</ParamField>
+
+<ParamField body="join" type="typeof path.join">
+  Joins path segments using the platform separator. Used to construct full module file paths.
+</ParamField>
+
+<ParamField body="basename" type="typeof path.basename">
+  Returns the last portion of a path. Used for filename extraction in stack traces.
+</ParamField>
+
+<ParamField body="dirname" type="typeof path.dirname">
+  Returns the directory portion of a path. Used to determine the directory context for relative `require` calls.
+</ParamField>
+
+---
+
+## Constructor
+
+```typescript
+constructor(options?: { fs?: VMFS, path?: VMPath })
+```
+
+Creates a new `VMFileSystem`. Both options are optional — omitting them falls back to Node's built-in `fs` and `path` modules.
+
+### Options
+
+<ParamField body="fs" type="VMFS">
+  Custom implementation of `fs.statSync` and `fs.readFileSync`. When omitted, Node's `fs` module is used.
+</ParamField>
+
+<ParamField body="path" type="VMPath">
+  Custom implementation of `path.resolve`, `path.isAbsolute`, `path.join`, `path.basename`, and `path.dirname`. When omitted, Node's `path` module is used.
+</ParamField>
+
+---
+
+## Methods
+
+`VMFileSystem` exposes the following methods, each delegating to the configured `fs` or `path` implementation.
+
+### statSync
+
+```typescript
+statSync: typeof fs.statSync
+```
+
+Delegates to `options.fs.statSync` (or Node's `fs.statSync`).
+
+### readFileSync
+
+```typescript
+readFileSync: typeof fs.readFileSync
+```
+
+Delegates to `options.fs.readFileSync` (or Node's `fs.readFileSync`).
+
+### resolve
+
+```typescript
+resolve: typeof pa.resolve
+```
+
+Delegates to `options.path.resolve` (or Node's `path.resolve`).
+
+### isAbsolute
+
+```typescript
+isAbsolute: typeof pa.isAbsolute
+```
+
+Delegates to `options.path.isAbsolute` (or Node's `path.isAbsolute`).
+
+### join
+
+```typescript
+join: typeof pa.join
+```
+
+Delegates to `options.path.join` (or Node's `path.join`).
+
+### basename
+
+```typescript
+basename: typeof pa.basename
+```
+
+Delegates to `options.path.basename` (or Node's `path.basename`).
+
+### dirname
+
+```typescript
+dirname: typeof pa.dirname
+```
+
+Delegates to `options.path.dirname` (or Node's `path.dirname`).
+
+### isSeparator
+
+```typescript
+isSeparator(char: string): boolean
+```
+
+Returns `true` if `char` is a path separator (`/` or the platform separator `path.sep`). The resolver uses this to detect separator characters when scanning module paths.
+
+---
+
+## Usage
+
+Pass a `VMFileSystem` instance as `require.fs` inside `NodeVMOptions`:
+
+```javascript
+import { NodeVM, VMFileSystem } from 'vm2';
+
+const vfs = new VMFileSystem(); // uses default fs + path
+
+const vm = new NodeVM({
+  require: {
+    external: ['lodash'],
+    root: './',
+    fs: vfs,
+  },
+});
+```
+
+---
+
+## Code examples
+
+### Custom in-memory filesystem
+
+```javascript
+import { NodeVM, VMFileSystem } from 'vm2';
+
+// In-memory file store
+const memFiles = {
+  '/sandbox/index.js': 'module.exports = require("./utils");',
+  '/sandbox/utils.js': 'module.exports = { double: x => x * 2 };',
+};
+
+const customFs = {
+  statSync(path) {
+    if (memFiles[path]) return { isDirectory: () => false, isFile: () => true };
+    throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' });
+  },
+  readFileSync(path) {
+    if (memFiles[path]) return memFiles[path];
+    throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' });
+  },
+};
+
+const vfs = new VMFileSystem({ fs: customFs });
+
+const vm = new NodeVM({
+  require: {
+    external: false,
+    fs: vfs,
+  },
+});
+```
+
+### Read-only filesystem overlay
+
+```javascript
+import { NodeVM, VMFileSystem } from 'vm2';
+import fs from 'fs';
+import path from 'path';
+
+// Only allow reads from a specific directory
+const allowedRoot = path.resolve('./sandbox-modules');
+
+const restrictedFs = {
+  statSync(filePath, options) {
+    if (!filePath.startsWith(allowedRoot)) {
+      throw Object.assign(new Error(`Access denied: ${filePath}`), { code: 'EACCES' });
+    }
+    return fs.statSync(filePath, options);
+  },
+  readFileSync(filePath, options) {
+    if (!filePath.startsWith(allowedRoot)) {
+      throw Object.assign(new Error(`Access denied: ${filePath}`), { code: 'EACCES' });
+    }
+    return fs.readFileSync(filePath, options);
+  },
+};
+
+const vfs = new VMFileSystem({ fs: restrictedFs });
+
+const vm = new NodeVM({
+  require: {
+    root: allowedRoot,
+    fs: vfs,
+  },
+});
+```

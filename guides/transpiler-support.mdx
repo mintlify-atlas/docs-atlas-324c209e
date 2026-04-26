@@ -1,0 +1,156 @@
+---
+title: "TypeScript and CoffeeScript in vm2"
+description: "Run TypeScript or CoffeeScript inside a vm2 sandbox using built-in compiler options, compilerOptions, or a custom compiler function."
+---
+
+vm2 can compile TypeScript and CoffeeScript before executing code in the sandbox. The `compiler` option is available on `VM`, `NodeVM`, and `VMScript`, and accepts either one of the built-in compiler names or a custom function that transforms source code into JavaScript before it runs.
+
+## Built-in compiler options
+
+The `compiler` option accepts four values:
+
+- `"javascript"` (default) — passes code through with no transformation
+- `"typescript"` — transpiles TypeScript using the `typescript` package
+- `"coffeescript"` — compiles CoffeeScript using the `coffee-script` package
+
+```javascript
+import { VM } from 'vm2';
+
+// TypeScript
+const tsVm = new VM({ compiler: 'typescript' });
+
+// CoffeeScript
+const csVm = new VM({ compiler: 'coffeescript' });
+```
+
+<Note>
+  vm2 does not bundle TypeScript or CoffeeScript. You must install the relevant package yourself before setting `compiler` to `"typescript"` or `"coffeescript"`. If the package is missing, vm2 throws a `VMError` at VM construction time.
+</Note>
+
+```bash
+# Install the compiler you need
+npm install typescript
+npm install coffee-script
+```
+
+## Custom compiler function
+
+If you need a different transpiler — or want full control over how code is transformed before it runs — you can pass a function directly as the `compiler` option. The function receives the source code and the filename, and must return a JavaScript string:
+
+```typescript
+type CompilerFunction = (code: string, filename: string) => string;
+```
+
+```javascript
+import { VM } from 'vm2';
+
+const vm = new VM({
+  compiler: (code, filename) => {
+    // Transform code however you need
+    return myTranspiler.compile(code, { filename });
+  },
+});
+```
+
+The `filename` argument reflects the script's filename, which you can use to pass to the underlying transpiler for accurate source maps or error messages.
+
+## Compiler options
+
+Use `compilerOptions` to pass configuration to the underlying compiler. This object is forwarded directly to the TypeScript or CoffeeScript compiler, so the valid keys depend on which compiler you are using:
+
+```javascript
+import { VM } from 'vm2';
+
+const vm = new VM({
+  compiler: 'typescript',
+  compilerOptions: {
+    strict: true,
+    target: 'ES2020',
+  },
+});
+```
+
+For a custom compiler function, `compilerOptions` is available on `VMScript` but the function itself is responsible for reading and applying the options.
+
+## TypeScript in VM
+
+```javascript
+import { VM } from 'vm2';
+
+const vm = new VM({
+  compiler: 'typescript',
+  sandbox: { result: null },
+});
+
+vm.run(`
+  const add = (a: number, b: number): number => a + b;
+  result = add(1, 2);
+`);
+```
+
+## Custom compiler function example
+
+```javascript
+import { VM } from 'vm2';
+import { transform } from '@babel/core';
+
+const vm = new VM({
+  compiler: (code, filename) => {
+    const result = transform(code, {
+      filename,
+      presets: ['@babel/preset-env'],
+    });
+    return result.code;
+  },
+});
+
+vm.run(`const arr = [1, 2, 3]; const [first, ...rest] = arr;`);
+```
+
+## NodeVM with TypeScript source extensions
+
+When using `NodeVM`, the `sourceExtensions` option tells the module resolver which file extensions to treat as source code. Add `"ts"` to load TypeScript files through `require`:
+
+```javascript
+import { NodeVM } from 'vm2';
+
+const vm = new NodeVM({
+  compiler: 'typescript',
+  sourceExtensions: ['js', 'ts'],
+  require: {
+    external: true,
+    root: './',
+  },
+});
+
+vm.run(`
+  const helper = require('./helper'); // loads helper.ts
+  module.exports = helper.greet('world');
+`, '/app/entry.ts');
+```
+
+The default value for `sourceExtensions` is `['js']`. You must include `'js'` alongside any additional extensions to preserve normal JavaScript loading.
+
+## Compiler selection in VMScript
+
+You can set the compiler per-script in the `VMScript` constructor, independently of the VM's compiler option. This is useful when you need to run a mix of JavaScript and TypeScript in the same `NodeVM`:
+
+```javascript
+import { VM, VMScript } from 'vm2';
+
+const vm = new VM();
+
+const tsScript = new VMScript(
+  `const greet = (name: string): string => 'Hello, ' + name;`,
+  {
+    filename: 'greet.ts',
+    compiler: 'typescript',
+  }
+);
+
+vm.run(tsScript);
+```
+
+<Tip>
+  When `VMScript` specifies a `compiler`, that compiler takes precedence over the one set on the `VM` or `NodeVM` instance for that specific script. This lets you mix compiled and plain JavaScript in the same sandbox.
+</Tip>

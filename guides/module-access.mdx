@@ -1,0 +1,234 @@
+---
+title: "Controlling module access in vm2"
+description: "Control which built-in and external modules sandboxed code can require, with mock modules, root restrictions, and custom resolvers."
+---
+
+`NodeVM` gives sandboxed code a `require` function that mirrors Node's CommonJS loader, but every aspect of it is under your control. You decide which built-in modules are accessible, which npm packages can be loaded, where on the filesystem local modules are allowed to live, and what any individual module returns when required. This page covers the full set of `require` options and how to combine them to suit your use case.
+
+## Built-in modules
+
+By default, sandboxed code cannot require any of Node's built-in modules. Use `require.builtin` to allowlist specific modules by name:
+
+```javascript
+import { NodeVM } from 'vm2';
+
+const vm = new NodeVM({
+  require: {
+    builtin: ['fs', 'path'],
+  },
+});
+```
+
+Pass `["*"]` to allow all built-ins:
+
+```javascript
+const vm = new NodeVM({
+  require: {
+    builtin: ['*'],
+  },
+});
+```
+
+<Warning>
+  Using `"*"` allows all current and future built-in modules. New Node.js releases may introduce built-ins that expand the attack surface in ways you have not anticipated. Prefer an explicit list of named modules.
+</Warning>
+
+## External modules
+
+`require.external` controls whether sandboxed code can load packages from `node_modules`. It accepts three forms:
+
+- `true` — all installed packages are allowed
+- An array of strings — only the listed packages are allowed (wildcards supported)
+- An object `{ modules, transitive }` — named allowlist with optional transitive dependency support
+
+```javascript
+// Allow all external modules
+const vm = new NodeVM({ require: { external: true } });
+
+// Allow only specific packages
+const vm = new NodeVM({ require: { external: ['lodash', 'axios'] } });
+
+// Allow packages matching a pattern, without transitive deps
+const vm = new NodeVM({
+  require: {
+    external: {
+      modules: ['@scope/*-ver-??'],
+      transitive: false,
+    },
+  },
+});
+```
+
+### Wildcard patterns
+
+The `modules` array supports wildcards. `*` matches any sequence of characters that does not include a path separator, and `?` matches exactly one such character. For example, `@scope/*-ver-??` matches `@scope/something-ver-aa` and `@scope/other-ver-11`.
+
+<Warning>
+  When `transitive` is `true`, any module required by an allowed external module also becomes accessible to the entire sandbox — even if it was not listed. Once loaded transitively, that module can be required directly by name as well.
+</Warning>
+
+## Root restriction
+
+`require.root` limits local `require` calls to one or more directory paths. Attempts to load a module outside the allowed paths throw a `VMError`:
+
+```javascript
+const vm = new NodeVM({
+  require: {
+    external: true,
+    root: './',
+  },
+});
+```
+
+You can pass an array to allow multiple roots:
+
+```javascript
+const vm = new NodeVM({
+  require: {
+    root: ['/app/plugins', '/app/shared'],
+  },
+});
+```
+
+## Mock modules
+
+`require.mock` lets you replace any module — built-in or external — with a custom object. The sandbox receives the mock value when it requires the module by name:
+
+```javascript
+import { NodeVM } from 'vm2';
+
+const vm = new NodeVM({
+  require: {
+    builtin: ['fs'],
+    mock: {
+      fs: {
+        readFileSync: () => 'Nice try!',
+      },
+    },
+  },
+});
+
+const result = vm.run(`
+  const fs = require('fs');
+  module.exports = fs.readFileSync('/etc/passwd', 'utf8');
+`);
+
+console.log(result); // "Nice try!"
+```
+
+Mocking is useful for intercepting filesystem or network access, providing test fixtures, or preventing sandboxed code from reading sensitive host data.
+
+## Module context and advanced options
+
+<ParamField path="context" type='"host" | "sandbox" | PathContextCallback' default='"host"'>
+  Where required modules are loaded and compiled. `"host"` requires modules in the host process and proxies them into the sandbox. `"sandbox"` compiles and runs modules inside the sandbox. Pass a `(modulePath, ext) => 'host' | 'sandbox'` callback to decide per module. Built-in modules (except `events`) are always loaded in the host regardless of this setting.
+</ParamField>
+
+<ParamField path="import" type="string[]">
+  Array of module names to preload into the NodeVM at startup, before any sandboxed code runs.
+</ParamField>
+
+<ParamField path="customRequire" type="(id: string) => any">
+  Replaces the host `require` function used to load built-in and host modules. Use this to intercept or instrument module loading at the host level.
+</ParamField>
+
+<ParamField path="resolve" type="(moduleName: string, parentDirname: string) => string | { path: string, module?: string } | undefined">
+  Additional lookup function called when a module is not found through standard Node.js resolution. Return a path string, an object `{ path, module? }`, or `undefined` to fall through to the default error.
+</ParamField>
+
+```javascript
+// context: load all modules inside the sandbox
+const vm = new NodeVM({
+  require: {
+    external: true,
+    context: 'sandbox',
+  },
+});
+
+// customRequire: intercept host-side module loading
+const vm = new NodeVM({
+  require: {
+    builtin: ['fs'],
+    customRequire: (id) => {
+      console.log(`Loading module: ${id}`);
+      return require(id);
+    },
+  },
+});
+
+// resolve: provide a custom fallback lookup
+const vm = new NodeVM({
+  require: {
+    external: true,
+    resolve: (moduleName, parentDirname) => {
+      if (moduleName === 'my-virtual-module') {
+        return '/app/virtual/my-virtual-module.js';
+      }
+      return undefined;
+    },
+  },
+});
+```
+
+<Note>
+  Built-in modules (except `events`) are always loaded in the host process and proxied into the sandbox regardless of the `context` setting.
+</Note>
+
+## Custom file system
+
+`require.fs` accepts a custom file system implementation, allowing you to intercept or virtualize filesystem access during module resolution. The object must implement the `VMFileSystemInterface`:
+
+```typescript
+import { VMFileSystem } from 'vm2';
+
+const customFs = new VMFileSystem({
+  fs: myCustomFsModule,
+  path: require('path'),
+});
+
+const vm = new NodeVM({
+  require: {
+    external: true,
+    fs: customFs,
+  },
+});
+```
+
+`VMFileSystem` wraps Node's `fs` and `path` modules by default. Pass custom implementations of either to change how files and paths are resolved.
+
+## Full configuration example
+
+```javascript
+import { NodeVM } from 'vm2';
+
+const vm = new NodeVM({
+  console: 'inherit',
+  sandbox: {},
+  require: {
+    external: true,
+    builtin: ['fs', 'path'],
+    root: './',
+    mock: {
+      fs: {
+        readFileSync: () => 'Nice try!',
+      },
+    },
+  },
+});
+
+let functionInSandbox = vm.run(
+  'module.exports = function(who) { console.log("hello " + who); }'
+);
+functionInSandbox('world');
+
+let functionWithCallbackInSandbox = vm.run(
+  'module.exports = function(who, callback) { callback("hello " + who); }'
+);
+functionWithCallbackInSandbox('world', greeting => {
+  console.log(greeting);
+});
+```
+
+<Warning>
+  The more modules you allow, the larger the attack surface. Restrict `require.builtin` and `require.external` to the minimum set your use case requires.
+</Warning>

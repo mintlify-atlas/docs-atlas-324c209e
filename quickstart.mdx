@@ -1,81 +1,201 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Get started with vm2"
+description: "Install vm2 and run untrusted JavaScript in a sandbox in minutes. Learn to use VM, NodeVM, and VMScript with real working examples."
 ---
 
-## Get started in three steps
+vm2 is available on npm and works with Node.js 6 and later. This guide walks you through installation and the three main ways to use vm2: the `VM` class for simple expression sandboxing, `NodeVM` for sandboxes that need to load modules, and `VMScript` for precompiling code you run repeatedly.
 
-Get your documentation site running locally and make your first customization.
+<Warning>
+  Read the [security disclaimer](/security-disclaimer) before using vm2 in production. vm2 provides in-process sandboxing, not OS-level isolation, and has known limitations.
+</Warning>
 
-### Step 1: Set up your local environment
+## Installation
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<CodeGroup>
 
-### Step 2: Deploy your changes
+```bash npm
+npm install vm2
+```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+```bash yarn
+yarn add vm2
+```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```bash pnpm
+pnpm add vm2
+```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+</CodeGroup>
 
-### Step 3: Go live
+## Step-by-step
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+<Steps>
+  <Step title="Install vm2">
+    Add vm2 to your project using the installation command above. vm2 has no runtime dependencies beyond acorn (used internally for code transformation) and works with any Node.js version 6 or later.
+  </Step>
+
+  <Step title="Create a VM sandbox and run code">
+    `VM` is the simpler of the two sandbox classes. It runs synchronous JavaScript with access only to built-in JavaScript objects and `Buffer`. There is no `require`, no `process`, and no access to the host environment unless you pass values in via `sandbox`.
+
+    ```javascript
+    import { VM } from 'vm2';
+
+    const vm = new VM({
+      timeout: 1000,
+      allowAsync: false,
+      sandbox: {},
+    });
+
+    vm.run('process.exit()'); // throws ReferenceError: process is not defined
+    ```
+
+    You can retrieve return values directly:
+
+    ```javascript
+    let number = vm.run('1337'); // returns 1337
+    ```
+
+    <Tip>
+      Use `timeout` together with `allowAsync: false` for the strongest execution constraints. The `timeout` option only applies to synchronous code passed to `run` — it does not limit methods returned from the sandbox.
+    </Tip>
+  </Step>
+
+  <Step title="Create a NodeVM sandbox with module access">
+    `NodeVM` allows sandboxed code to `require` modules, similar to a normal Node.js script. You control exactly which built-in and external modules are allowed.
+
+    ```javascript
+    import { NodeVM } from 'vm2';
+
+    const vm = new NodeVM({
+      console: 'inherit',
+      sandbox: {},
+      require: {
+        external: true,
+        builtin: ['fs', 'path'],
+        root: './',
+        mock: {
+          fs: {
+            readFileSync: () => 'Nice try!',
+          },
+        },
+      },
+    });
+
+    // Export a function from the sandbox and call it from the host
+    let functionInSandbox = vm.run(
+      'module.exports = function(who) { console.log("hello " + who); }'
+    );
+    functionInSandbox('world'); // logs: hello world
+    ```
+
+    You can also run scripts that use `require` directly:
+
+    ```javascript
+    import { NodeVM } from 'vm2';
+
+    const vm = new NodeVM({
+      require: {
+        external: true,
+        root: './',
+      },
+    });
+
+    vm.run(
+      `
+      var request = require('request');
+      request('http://www.google.com', function (error, response, body) {
+          console.error(error);
+          if (!error && response.statusCode == 200) {
+              console.log(body);
+          }
+      });
+      `,
+      'vm.js',
+    );
+    ```
+
+    <Note>
+      The second argument to `vm.run()` in NodeVM is the filename. Pass the full path of the script when loading modules by relative path — it is used to resolve `require` calls and appears in stack traces.
+    </Note>
+
+    <Warning>
+      `NodeVM` does not support the `timeout` option. It is not immune to infinite loops like `while (true) {}`. The more modules you allow, the larger your attack surface.
+    </Warning>
+  </Step>
+
+  <Step title="Use VMScript for precompiled code">
+    `VMScript` lets you compile a script once and run it multiple times, which improves performance when you execute the same code repeatedly. The compiled script is not bound to any particular sandbox — it is rebound at each `run` call.
+
+    ```javascript
+    import { VM, VMScript } from 'vm2';
+
+    const vm = new VM();
+    const script = new VMScript('Math.random()');
+
+    console.log(vm.run(script)); // e.g. 0.4176842310
+    console.log(vm.run(script)); // e.g. 0.9103211874
+    ```
+
+    `VMScript` also works with `NodeVM`:
+
+    ```javascript
+    import { NodeVM, VMScript } from 'vm2';
+
+    const vm = new NodeVM();
+    const script = new VMScript('module.exports = Math.random()');
+
+    console.log(vm.run(script));
+    console.log(vm.run(script));
+    ```
+
+    Code compiles automatically on first run. You can also trigger compilation explicitly:
+
+    ```javascript
+    try {
+      const script = new VMScript('Math.random()').compile();
+    } catch (err) {
+      console.error('Failed to compile script.', err);
+    }
+    ```
+
+    <Tip>
+      Pre-compile scripts at application startup to avoid compilation cost on the first execution in production.
+    </Tip>
+  </Step>
+</Steps>
+
+## Error handling
+
+Synchronous errors from compilation and execution can be caught with `try/catch`. Asynchronous errors require an `uncaughtException` handler on `process`:
+
+```javascript
+try {
+  var script = new VMScript('Math.random()').compile();
+} catch (err) {
+  console.error('Failed to compile script.', err);
+}
+
+try {
+  vm.run(script);
+} catch (err) {
+  console.error('Failed to execute script.', err);
+}
+
+process.on('uncaughtException', err => {
+  console.error('Asynchronous error caught.', err);
+});
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+<CardGroup cols={3}>
+  <Card title="Security disclaimer" icon="shield-halved" href="/security-disclaimer">
+    Understand what vm2 can and cannot protect against before going to production.
+  </Card>
+  <Card title="VM reference" icon="square-terminal" href="/concepts/vm">
+    Full option reference and usage patterns for the VM class.
+  </Card>
+  <Card title="NodeVM reference" icon="node-js" href="/concepts/nodevm">
+    Module access control, console redirection, and all NodeVM options.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

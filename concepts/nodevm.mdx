@@ -1,0 +1,280 @@
+---
+title: 'NodeVM: Node-Style Sandboxed Execution'
+description: 'Run untrusted code with a full CommonJS module environment. NodeVM extends VM with require, console control, and module allowlisting.'
+---
+
+`NodeVM` extends `VM` with a CommonJS module loader, giving sandboxed code access to `require`, `module`, `exports`, `__dirname`, and `__filename` — the same variables available in a regular Node.js module. Use `NodeVM` when the untrusted code needs to load modules, when you want fine-grained control over which built-in and external packages the sandbox can access, or when the code follows a module-export pattern rather than a simple expression.
+
+<Warning>
+  `timeout` is **not effective** for `NodeVM`. A sandboxed script can spin indefinitely with `while (true) {}` and the timeout will not interrupt it. If you need to protect against infinite loops, run the `NodeVM` in a separate worker thread or child process, and terminate it externally.
+</Warning>
+
+## Options
+
+`NodeVM` accepts all `VM` options (`compiler`, `eval`, `wasm`) plus the following:
+
+<ParamField body="console" type="string" default="inherit">
+  Controls `console` behavior inside the sandbox. `"inherit"` passes calls through to the host console. `"redirect"` emits events on the `NodeVM` instance (e.g., `"console.log"`, `"console.error"`) instead of writing to stdout/stderr. `"off"` silences all console output.
+</ParamField>
+
+<ParamField body="sandbox" type="object">
+  An object whose properties are copied into the sandbox's global scope as global variables.
+</ParamField>
+
+<ParamField body="compiler" type="string | CompilerFunction" default="javascript">
+  The compiler to apply to loaded source files. Built-in values: `"javascript"`, `"typescript"`, `"coffeescript"`. Can also be a custom `(code: string, filename: string) => string` function. The `typescript` and `coffeescript` values require the corresponding package installed in the host.
+</ParamField>
+
+<ParamField body="eval" type="boolean" default="true">
+  When `false`, calls to `eval()` or dynamic function constructors (`Function`, `GeneratorFunction`, etc.) inside the sandbox throw an `EvalError`.
+</ParamField>
+
+<ParamField body="wasm" type="boolean" default="true">
+  When `false`, attempts to compile a WebAssembly module throw a `WebAssembly.CompileError`.
+</ParamField>
+
+<ParamField body="sourceExtensions" type="string[]" default='["js"]'>
+  File extensions the internal module resolver treats as JavaScript source code. Useful when loading TypeScript or CoffeeScript modules through `require`.
+</ParamField>
+
+<ParamField body="require" type="boolean | VMRequire | Resolver" default="false">
+  Enables `require` inside the sandbox. Pass `true` to enable with defaults, an options object to configure allowed modules, or a pre-built `Resolver` instance.
+</ParamField>
+
+<ParamField body="require.builtin" type="string[]" default="[]">
+  Array of allowed Node.js built-in module names (e.g., `['fs', 'path']`). Pass `["*"]` to allow all built-ins.
+
+  <Warning>
+    `"*"` allows all current and future built-in modules. New Node.js versions may add built-ins that expand the attack surface. Prefer an explicit allowlist.
+  </Warning>
+</ParamField>
+
+<ParamField body="require.external" type="boolean | string[] | object" default="false">
+  Controls access to `node_modules`. `true` allows all external modules. An array of strings restricts to named packages (wildcards supported, e.g., `["@scope/*-ver-??"]`). An object form accepts `{ modules: string[], transitive: boolean }`.
+
+  <Warning>
+    When `transitive` is `true`, any module required transitively becomes available to the entire sandbox, even if it was not explicitly listed.
+  </Warning>
+</ParamField>
+
+<ParamField body="require.external.modules" type="string[]">
+  Array of allowed external module names when using the object form of `require.external`. Supports wildcards (`*` does not match path separators).
+</ParamField>
+
+<ParamField body="require.external.transitive" type="boolean" default="false">
+  When `true`, transitive dependencies of allowed external modules may also be required.
+</ParamField>
+
+<ParamField body="require.root" type="string | string[]">
+  Restricts local `require` calls to one or more directory paths. When omitted, every path is reachable.
+</ParamField>
+
+<ParamField body="require.mock" type="object">
+  A map of module names to replacement objects. Applies to both built-in and external modules. The sandbox receives the mock instead of the real module.
+</ParamField>
+
+<ParamField body="require.context" type='"host" | "sandbox" | PathContextCallback' default="host">
+  Where modules are loaded and compiled. `"host"` loads in the host process and proxies the result into the sandbox. `"sandbox"` compiles modules inside the sandbox context. A callback `(modulePath, ext) => "host" | "sandbox"` lets you choose per module. Built-in modules (except `events`) are always loaded in the host regardless of this setting.
+</ParamField>
+
+<ParamField body="require.import" type="string[]">
+  Array of module names to load into the sandbox automatically on startup.
+</ParamField>
+
+<ParamField body="require.resolve" type="(moduleName, parentDirname) => string | { path, module? } | undefined">
+  An additional lookup function called when normal Node module resolution fails.
+</ParamField>
+
+<ParamField body="require.customRequire" type="(id: string) => any">
+  Replaces Node's built-in `require` for loading host and built-in modules.
+</ParamField>
+
+<ParamField body="require.strict" type="boolean" default="true">
+  When `false`, modules loaded via `require` are not forced into strict mode.
+</ParamField>
+
+<ParamField body="require.fs" type="VMFileSystemInterface">
+  Custom file system implementation for module loading.
+</ParamField>
+
+<ParamField body="nesting" type="boolean" default="false">
+  When `true`, sandboxed code can create new `NodeVM` instances via `require('vm2')`.
+
+  <Warning>
+    Enabling `nesting` is a security risk. A nested `NodeVM` created inside the sandbox can require any host module, bypassing the outer sandbox's allowlists.
+  </Warning>
+</ParamField>
+
+<ParamField body="wrapper" type="string" default="commonjs">
+  `"commonjs"` wraps the script in a CommonJS function and returns `module.exports`. `"none"` skips the wrapper and returns the script's direct return value, behaving similarly to `VM`.
+</ParamField>
+
+<ParamField body="argv" type="string[]">
+  Array passed to `process.argv` inside the sandbox. The sandbox can mutate this array.
+</ParamField>
+
+<ParamField body="env" type="object">
+  Object passed to `process.env` inside the sandbox. The sandbox can mutate this object.
+</ParamField>
+
+<ParamField body="strict" type="boolean" default="false">
+  When `true`, all modules loaded by the sandbox run in strict mode.
+</ParamField>
+
+## Full example
+
+```javascript nodevm-full.js
+import { NodeVM } from 'vm2';
+
+const vm = new NodeVM({
+  console: 'inherit',
+  sandbox: {},
+  require: {
+    external: true,
+    builtin: ['fs', 'path'],
+    root: './',
+    mock: {
+      fs: {
+        readFileSync: () => 'Nice try!',
+      },
+    },
+  },
+});
+
+// Synchronous module exports
+let functionInSandbox = vm.run('module.exports = function(who) { console.log("hello "+ who); }');
+functionInSandbox('world');
+
+// Async module exports with callback
+let functionWithCallbackInSandbox = vm.run('module.exports = function(who, callback) { callback("hello "+ who); }');
+functionWithCallbackInSandbox('world', greeting => {
+  console.log(greeting);
+});
+```
+
+<Note>
+  The more modules you allow, the larger the attack surface. Restrict `require.builtin` and `require.external` to the minimum set your use case requires.
+</Note>
+
+## Synchronous vs async module exports
+
+With `wrapper: "commonjs"` (the default), `run()` returns `module.exports`. Sandboxed code should assign its public API to `module.exports`:
+
+```javascript nodevm-exports.js
+import { NodeVM } from 'vm2';
+
+const vm = new NodeVM();
+
+// Synchronous: returns the exported value directly
+const add = vm.run('module.exports = (a, b) => a + b');
+console.log(add(2, 3)); // 5
+
+// Async: returns a Promise via module.exports
+const fetchData = vm.run('module.exports = async (url) => url.toUpperCase()');
+fetchData('hello').then(console.log); // HELLO
+```
+
+When `wrapper` is set to `"none"`, `NodeVM` behaves like `VM` for synchronous return values:
+
+```javascript nodevm-wrapper-none.js
+import { NodeVM } from 'vm2';
+
+const vm = new NodeVM({ wrapper: 'none' });
+assert.ok(vm.run('return true') === true);
+```
+
+## Loading modules by relative path
+
+To resolve `require()` calls using paths relative to a specific directory, pass the script's full path as the second argument to `run()`. This path also appears in stack traces:
+
+```javascript nodevm-relative.js
+import { NodeVM } from 'vm2';
+
+const vm = new NodeVM({
+  require: { external: true, root: './' },
+});
+
+vm.run('require("foobar")', '/data/myvmscript.js');
+```
+
+When using a `VMScript`, set the path in the constructor instead:
+
+```javascript nodevm-vmscript-path.js
+import { NodeVM, VMScript } from 'vm2';
+
+const script = new VMScript('require("foobar")', { filename: '/data/myvmscript.js' });
+vm.run(script);
+```
+
+## Sharing a resolver across multiple VMs
+
+A `Resolver` can be reused across `NodeVM` instances. Compiled module code is cached in the resolver, which can reduce load times when you create many sandboxes with the same module configuration.
+
+```javascript nodevm-resolver.js
+import { NodeVM, makeResolverFromLegacyOptions } from 'vm2';
+
+const resolver = makeResolverFromLegacyOptions({
+  external: true,
+  builtin: ['fs', 'path'],
+  root: './',
+  mock: {
+    fs: {
+      readFileSync: () => 'Nice try!',
+    },
+  },
+});
+
+const vm = new NodeVM({
+  console: 'inherit',
+  sandbox: {},
+  require: resolver,
+});
+```
+
+Pass the same `resolver` to additional `NodeVM` instances to share the compiled module cache.
+
+## Methods
+
+### `run(code, options?)`
+
+Runs a string or `VMScript` inside the sandbox. With `wrapper: "commonjs"` (default), returns `module.exports`. With `wrapper: "none"`, returns the script's direct return value.
+
+```typescript
+run(js: string | VMScript, options?: string | {
+  filename?: string,
+  wrapper?: "commonjs" | "none",
+  strict?: boolean
+}): any
+```
+
+### `runFile(filename)`
+
+Reads a file from disk and runs it as a module inside the sandbox.
+
+```typescript
+runFile(filename: string): any
+```
+
+### `require(module)`
+
+Requires a module inside the sandbox and returns its exports. Useful for pre-loading modules before running sandboxed code.
+
+```typescript
+require(module: string): any
+```
+
+### `NodeVM.code(script, filename?, options?)` (static)
+
+Convenience method that creates a `NodeVM`, runs `script`, and returns the result. Equivalent to `new NodeVM(options).run(script, filename)`.
+
+```typescript
+static code(script: string, filename?: string, options?: NodeVMOptions): any
+```
+
+### `NodeVM.file(filename, options?)` (static)
+
+Convenience method that creates a `NodeVM`, loads a file from disk, and runs it. Automatically selects the compiler for `.ts`, `.cs`, and `.coffee` extensions if no `compiler` option is set.
+
+```typescript
+static file(filename: string, options?: NodeVMOptions): any
+```

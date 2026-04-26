@@ -1,0 +1,141 @@
+---
+title: "makeResolverFromLegacyOptions reference"
+description: "Converts VMRequire options into a standalone Resolver that can be shared across multiple NodeVM instances, caching compiled module code."
+---
+
+`makeResolverFromLegacyOptions` converts a `VMRequire` options object into a standalone `Resolver` instance. Because the `Resolver` holds compiled module state, you can pass the same instance to multiple `NodeVM` constructors and share that compiled module cache across all of them—avoiding redundant compilation work on every instantiation.
+
+## Function signature
+
+```typescript
+makeResolverFromLegacyOptions(
+  options: VMRequire,
+  override?: { [key: string]: Builtin },
+  compiler?: CompilerFunction
+): Resolver
+```
+
+## Parameters
+
+<ParamField path="options" type="VMRequire" required>
+  The require configuration that you would normally pass inline to `NodeVM`. All `VMRequire` fields are accepted. See [VMRequire fields](#vmrequire-fields) below.
+</ParamField>
+
+<ParamField path="override" type="{ [key: string]: Builtin }">
+  Custom overrides for built-in modules. Each key is a built-in module name; the value is a `Builtin` (either a load function or an `{ init, load }` object). Overrides are applied after the standard built-in resolution.
+</ParamField>
+
+<ParamField path="compiler" type="CompilerFunction">
+  A custom compiler applied to every module loaded through the resolver. If omitted, modules are loaded as plain JavaScript. Signature: `(code: string, filename: string) => string`.
+</ParamField>
+
+## VMRequire fields
+
+These are all the fields accepted by the `options` argument.
+
+<ParamField path="builtin" type="readonly string[]">
+  Array of allowed built-in Node.js modules. Pass `["*"]` to allow all built-ins. Defaults to none.
+
+  <Warning>Using `"*"` increases the attack surface. New Node.js built-ins added in future releases will be automatically permitted.</Warning>
+</ParamField>
+
+<ParamField path="context" type='"host" | "sandbox" | PathContextCallback'>
+  Where modules are loaded. `"host"` (default) requires modules in the host process and proxies them into the sandbox. `"sandbox"` compiles and runs modules entirely inside the sandbox. Pass a `PathContextCallback` to choose per-module.
+
+  Built-in modules (except `events`) are always required in the host, regardless of this setting.
+</ParamField>
+
+<ParamField path="external" type="boolean | readonly string[] | { modules: readonly string[], transitive: boolean }">
+  Controls access to external (npm) modules. `false` (default) blocks all external requires. `true` allows all. Pass an array of module names to allow specific packages. The object form also lets you set `transitive: true` to allow transitive dependencies.
+
+  <Warning>When `transitive` is `true`, any module that was transitively loaded can then be required directly, even if it was not previously allowed.</Warning>
+</ParamField>
+
+<ParamField path="import" type="readonly string[]">
+  Modules to load into the `NodeVM` automatically on start, before any user code runs.
+</ParamField>
+
+<ParamField path="root" type="string | readonly string[]">
+  Restricts local `require` calls to the given path or paths. Defaults to every path.
+</ParamField>
+
+<ParamField path="mock" type="any">
+  An object whose keys are module names and values are the mock implementations returned when that module is required. Works for both built-in and external modules.
+</ParamField>
+
+<ParamField path="resolve" type="(moduleName: string, parentDirname: string) => string | { path: string, module?: string } | undefined">
+  A fallback lookup function called when a module is not found through Node's normal resolution algorithm. Return the resolved path as a string, an object with `path` and an optional `module` override, or `undefined` to fall through to a not-found error.
+</ParamField>
+
+<ParamField path="customRequire" type="HostRequire">
+  Replaces the host-side `require` function used to load built-in and host modules. Signature: `(id: string) => any`.
+</ParamField>
+
+<ParamField path="strict" type="boolean">
+  Load required modules in strict mode. Defaults to `true`.
+</ParamField>
+
+<ParamField path="fs" type="VMFileSystemInterface">
+  Custom file system implementation used when reading module files. Defaults to Node's real `fs` and `path` modules. Useful for virtual file systems or testing.
+</ParamField>
+
+## Return type
+
+Returns a `Resolver` instance. `Resolver` is an abstract class and cannot be instantiated directly—use `makeResolverFromLegacyOptions` to obtain one.
+
+```typescript
+export abstract class Resolver {
+  private constructor(
+    fs: VMFileSystemInterface,
+    globalPaths: readonly string[],
+    builtins: Map<string, Builtin>
+  );
+}
+```
+
+Pass the returned `Resolver` to `NodeVMOptions.require`:
+
+```typescript
+const vm = new NodeVM({ require: resolver });
+```
+
+## When to use
+
+Use `makeResolverFromLegacyOptions` when you need to create more than one `NodeVM` with the same module configuration. The resolver compiles each module once and caches the result, so subsequent `NodeVM` instances that share it skip recompilation.
+
+If you only ever create a single `NodeVM`, passing a plain `VMRequire` object inline is equivalent and simpler.
+
+## Example
+
+The following example, taken from the vm2 README, rewrites an inline `NodeVM` require config using a shared resolver:
+
+```javascript
+import { NodeVM, makeResolverFromLegacyOptions } from 'vm2';
+
+// Create the resolver once
+const resolver = makeResolverFromLegacyOptions({
+  external: true,
+  builtin: ['fs', 'path'],
+  root: './',
+  mock: {
+    fs: {
+      readFileSync: () => 'Nice try!',
+    },
+  },
+});
+
+// Share it across multiple NodeVM instances
+const vm1 = new NodeVM({
+  console: 'inherit',
+  sandbox: {},
+  require: resolver,
+});
+
+const vm2 = new NodeVM({
+  console: 'off',
+  sandbox: { userId: 42 },
+  require: resolver,
+});
+```
+
+Both `vm1` and `vm2` share the same compiled module cache. The `fs` mock applies to both instances because it is encoded in the shared resolver.

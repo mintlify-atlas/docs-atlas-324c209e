@@ -1,0 +1,83 @@
+---
+title: "Known limitations and escape risks in vm2"
+description: "An honest catalog of vm2's structural limitations, including V8 internal bypasses, transformer blind spots, and known issues that cannot be fully patched."
+---
+
+vm2 takes an honest position on its own limitations: because it runs untrusted code inside the same Node.js process as your application, complete isolation is structurally impossible. The library is actively maintained and vulnerabilities are patched as they are discovered, but the cat-and-mouse nature of in-process sandboxing means that the list below reflects the current state — not a final one. Understanding these limitations is essential before deciding whether vm2 is appropriate for your use case.
+
+<Warning>
+  In-process sandboxing cannot guarantee complete isolation. If you are running code from completely untrusted sources such as arbitrary user submissions, you should use a solution with process-level or hardware-level isolation instead.
+</Warning>
+
+## Known issues
+
+The following issues are documented in the project and have no current fix:
+
+- **Extending proxied classes is not possible.** It is not possible to define a class that extends a proxied class, including using a proxied class in `Object.create`. This is a fundamental V8 constraint on how `extends` resolves the superclass constructor.
+
+- **Direct `eval` does not work inside the sandbox.** Code that calls `eval(...)` directly in the sandbox context does not receive the transformer's catch-block instrumentation, removing one layer of defense.
+
+- **Logging sandbox arrays duplicates output.** When sandbox arrays are passed to `console.log` or similar, the array contents appear twice — once as the array and once as properties — due to the way the Proxy membrane reflects the object structure.
+
+- **Source code transformations alter function source strings.** The transformer rewrites sandbox code before it runs. As a result, calling `.toString()` on a function defined inside the sandbox returns the transformed source, not the original. Code that inspects its own source may behave unexpectedly.
+
+- **The node process can be crashed from inside the sandbox.** There are known methods to trigger a process crash (distinct from code execution or data exfiltration) from within the sandbox. These cannot be fully prevented at the in-process level.
+
+## Transformer limitation: ES2022 ceiling
+
+`lib/transformer.js` uses Acorn with `ecmaVersion: 2022`. Any syntax introduced after ES2022 is invisible to the parser. The most significant example is `using` declarations (ES2024 explicit resource management):
+
+```javascript
+// The transformer cannot parse 'using', so it does not instrument
+// the implicit catch block that 'using' generates.
+// This means errors thrown during disposal may bypass handleException.
+{
+  using resource = getSomeResource();
+  // ...
+}
+```
+
+If Node.js adds native support for post-ES2022 syntax, sandbox code using that syntax inside `eval()` or loaded modules can bypass catch-block instrumentation entirely, creating a direct path to host-realm error objects.
+
+## V8 internal algorithms bypass proxy traps
+
+Many V8 specification algorithms are implemented in C++ and operate on raw object pointers rather than going through JavaScript-level Proxy traps. These include:
+
+- **`ArraySpeciesCreate`** — used when array methods like `.map()`, `.filter()`, and `.slice()` create a new array. V8 reads `arr.constructor[Symbol.species]` at the C++ level, bypassing the bridge's `get` trap.
+- **`FormatStackTrace`** — when V8 formats a stack trace, its C++ code calls `Error.prototype.toString()` directly. If `error.name` is a `Symbol`, the string concatenation throws a `TypeError` in whatever realm the formatting happens in, potentially generating a host-realm error inside a sandbox catch block.
+- **`PromiseResolveThenableJob`** — Promise resolution that involves a thenable runs in a microtask, and the C++ scheduler may invoke the `.then` method on the raw object rather than through the sandbox proxy.
+
+Any defense that relies solely on proxy traps is structurally incomplete against these paths. vm2 addresses them by neutralizing raw objects directly — for example, overwriting `constructor` on host arrays before they enter the sandbox — but new V8 releases may introduce new C++ paths.
+
+<Info>
+  The `Error.prepareStackTrace` hook is one of vm2's key defenses against `FormatStackTrace` attacks. The sandbox bootstrap (`lib/setup-sandbox.js`) installs a safe default so that host-realm stack formatting cannot be redirected by sandbox code.
+</Info>
+
+## New bypasses will be discovered
+
+The README is explicit:
+
+> Despite our best efforts, researchers and security professionals continuously discover new ways to escape the vm2 sandbox. We actively patch these vulnerabilities as they are reported, but the cat-and-mouse nature of in-process sandboxing means that new bypasses will likely be discovered in the future.
+
+This is not a theoretical concern. The [security advisory history](https://github.com/patriksimek/vm2/security/advisories) shows a consistent pattern of new escapes being reported and patched. Each patch closes one path, but does not guarantee that adjacent paths are also closed.
+
+## Recommendations
+
+<Tip>
+  Use defense in depth. vm2 should not be your only line of defense when executing untrusted code. Combine it with network isolation, filesystem restrictions, OS-level resource limits, and process monitoring.
+</Tip>
+
+- Keep vm2 updated and subscribe to security advisories. A version that was safe last month may have a known escape today.
+- Validate all values returned from the sandbox with `typeof` before using them. Do not assume returned objects are safe to pass to host functions without checking.
+- Treat the sandbox as an untrusted caller. Any method you expose to the sandbox is a potential attack surface.
+
+## Alternatives with stronger isolation
+
+If complete isolation is required, the following alternatives provide process-level or hardware-level separation:
+
+| Solution | Approach | Performance | Trade-offs |
+|----------|----------|-------------|------------|
+| **[isolated-vm](https://github.com/laverdet/isolated-vm)** | Separate V8 isolates (different V8 heap) | Fast | In maintenance mode; requires manual V8 updates |
+| **Separate process / Worker** | `child_process` or Worker threads with limited permissions | Medium | Higher IPC overhead; data must be serialized |
+| **Containers / VMs** | Docker, gVisor, Firecracker | Slow | Startup overhead; resource-heavy |
+| **Managed services** | Cloud-based code execution (e.g., AWS Lambda, Cloudflare Workers) | Variable | Network latency; external dependency |

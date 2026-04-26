@@ -1,0 +1,300 @@
+---
+title: "vm2 TypeScript types and interfaces"
+description: "Complete reference for all TypeScript types exported by vm2: options interfaces, callback signatures, file system abstractions, and the Resolver class."
+---
+
+vm2 ships full TypeScript definitions via `index.d.ts`. Every public type used by the library is exported from the package root, so you can import them directly without reaching into internal paths. The `"types"` field in `package.json` points to `index.d.ts`, which TypeScript resolves automatically when you install the package.
+
+## Import examples
+
+```typescript
+import type {
+  VMOptions,
+  NodeVMOptions,
+  VMRequire,
+  CompilerFunction,
+  PathContextCallback,
+  HostRequire,
+  Builtin,
+  BuiltinLoad,
+  VMFS,
+  VMPath,
+  VMFileSystemInterface,
+  Resolver,
+} from 'vm2';
+```
+
+You can also import concrete classes alongside types:
+
+```typescript
+import { VM, NodeVM, VMScript, VMFileSystem, VMError } from 'vm2';
+import type { VMOptions, NodeVMOptions } from 'vm2';
+```
+
+## Types and interfaces
+
+### VMOptions
+
+Options passed to the `VM` constructor.
+
+```typescript
+export interface VMOptions {
+  compiler?: "javascript" | "typescript" | "coffeescript" | CompilerFunction;
+  compilerOptions?: Record<string, any>;
+  sandbox?: any;
+  timeout?: number;
+  eval?: boolean;
+  wasm?: boolean;
+  fixAsync?: boolean;
+  allowAsync?: boolean;
+}
+```
+
+<ParamField path="compiler" type='"javascript" | "typescript" | "coffeescript" | CompilerFunction'>
+  Language or custom function used to compile code before execution. Defaults to `"javascript"`. The `"typescript"` and `"coffeescript"` values require the respective packages to be installed separately.
+</ParamField>
+
+<ParamField path="compilerOptions" type="Record<string, any>">
+  Additional options forwarded to the selected compiler.
+</ParamField>
+
+<ParamField path="sandbox" type="any">
+  Object whose properties are merged into the VM's global scope.
+</ParamField>
+
+<ParamField path="timeout" type="number">
+  Script timeout in milliseconds. Only effective on synchronous code run through `vm.run()`. Does not apply to methods returned by the VM or asynchronous callbacks.
+</ParamField>
+
+<ParamField path="eval" type="boolean">
+  Set to `false` to throw an `EvalError` on any use of `eval` or function constructors (`Function`, `GeneratorFunction`, etc.). Defaults to `true`.
+</ParamField>
+
+<ParamField path="wasm" type="boolean">
+  Set to `false` to throw a `WebAssembly.CompileError` on any attempt to compile a WebAssembly module. Defaults to `true`.
+</ParamField>
+
+<ParamField path="allowAsync" type="boolean">
+  Set to `false` to throw a `VMError` on any use of `async`/`await`. Defaults to `true`.
+</ParamField>
+
+<ParamField path="fixAsync" type="boolean" deprecated>
+  Deprecated. Use `allowAsync` instead.
+</ParamField>
+
+---
+
+### NodeVMOptions
+
+Extends `VMOptions` with additional options specific to `NodeVM`.
+
+```typescript
+export interface NodeVMOptions extends VMOptions {
+  console?: "inherit" | "redirect" | "off";
+  require?: boolean | VMRequire | Resolver;
+  nesting?: boolean;
+  wrapper?: "commonjs" | "none";
+  sourceExtensions?: readonly string[];
+  argv?: string[];
+  env?: any;
+  strict?: boolean;
+}
+```
+
+<ParamField path="console" type='"inherit" | "redirect" | "off"'>
+  Controls sandbox console output. `"inherit"` (default) passes output through to the host console. `"redirect"` emits `console.*` events on the `NodeVM` instance. `"off"` silences all console output.
+</ParamField>
+
+<ParamField path="require" type="boolean | VMRequire | Resolver">
+  Enables `require` inside the sandbox. Pass `false` (default) to disable, `true` or a `VMRequire` object to configure module access, or a pre-built `Resolver` to share compiled module state across instances.
+</ParamField>
+
+<ParamField path="nesting" type="boolean">
+  Set to `true` to allow sandboxed code to create new `NodeVM` instances. Defaults to `false`.
+
+  <Warning>Enabling nesting is a security risk. Sandboxed code can create a `NodeVM` that requires any host module, effectively bypassing the sandbox.</Warning>
+</ParamField>
+
+<ParamField path="wrapper" type='"commonjs" | "none"'>
+  `"commonjs"` (default) wraps the script in a CommonJS module wrapper so `module.exports` and `require` are available. `"none"` returns the value produced by the script directly.
+</ParamField>
+
+<ParamField path="sourceExtensions" type="readonly string[]">
+  File extensions the internal module resolver treats as source files. Defaults to `['js']`.
+</ParamField>
+
+<ParamField path="argv" type="string[]">
+  Array passed to `process.argv` inside the sandbox. The array is not copied—sandbox code can mutate it.
+</ParamField>
+
+<ParamField path="env" type="any">
+  Object passed to `process.env` inside the sandbox. The object is not copied—sandbox code can mutate it.
+</ParamField>
+
+<ParamField path="strict" type="boolean">
+  Run modules in strict mode. Defaults to `false`.
+</ParamField>
+
+---
+
+### VMRequire
+
+Require configuration used inside `NodeVMOptions.require` or passed to `makeResolverFromLegacyOptions`.
+
+```typescript
+export interface VMRequire {
+  builtin?: readonly string[];
+  context?: "host" | "sandbox" | PathContextCallback;
+  external?: boolean | readonly string[] | { modules: readonly string[], transitive: boolean };
+  import?: readonly string[];
+  root?: string | readonly string[];
+  mock?: any;
+  resolve?: (moduleName: string, parentDirname: string) => string | { path: string, module?: string } | undefined;
+  customRequire?: HostRequire;
+  strict?: boolean;
+  fs?: VMFileSystemInterface;
+}
+```
+
+See the [makeResolverFromLegacyOptions reference](/api/make-resolver) for detailed documentation of each field.
+
+---
+
+### CompilerFunction
+
+A custom compiler function that transforms source code before it runs in the VM.
+
+```typescript
+export type CompilerFunction = (code: string, filename: string) => string;
+```
+
+The function receives the raw source string and the file path, and must return the transformed source string. Use this to transpile TypeScript, apply source transforms, or instrument code before execution.
+
+---
+
+### PathContextCallback
+
+A callback that decides whether a module should run in the `"host"` or `"sandbox"` context on a per-file basis.
+
+```typescript
+export type PathContextCallback = (modulePath: string, extensionType: string) => 'host' | 'sandbox';
+```
+
+Return `'host'` to require the module in the host process and proxy it into the sandbox. Return `'sandbox'` to compile and run it entirely inside the sandbox. If nothing is returned, the default is `'sandbox'`.
+
+---
+
+### HostRequire
+
+The signature of a custom require function used by `VMRequire.customRequire`.
+
+```typescript
+export type HostRequire = (id: string) => any;
+```
+
+---
+
+### Builtin
+
+A built-in module loader. Either a bare load function or an object with a separate `init` phase and a `load` phase.
+
+```typescript
+export type Builtin = BuiltinLoad | { init: (vm: NodeVM) => void, load: BuiltinLoad };
+```
+
+Use the object form when the built-in needs to run setup logic (`init`) once against the `NodeVM` instance before the module is first loaded.
+
+---
+
+### BuiltinLoad
+
+The function signature for loading a built-in module into a `NodeVM`.
+
+```typescript
+export type BuiltinLoad = (vm: NodeVM) => any;
+```
+
+The function receives the `NodeVM` instance and returns the module's exported value.
+
+---
+
+### VMFS
+
+Minimal interface for the parts of Node's `fs` module that vm2 uses to read module files.
+
+```typescript
+export interface VMFS {
+  statSync: typeof fs.statSync;
+  readFileSync: typeof fs.readFileSync;
+}
+```
+
+---
+
+### VMPath
+
+Minimal interface for the parts of Node's `path` module that vm2 uses to resolve module paths.
+
+```typescript
+export interface VMPath {
+  resolve: typeof pa.resolve;
+  isAbsolute: typeof pa.isAbsolute;
+  join: typeof pa.join;
+  basename: typeof pa.basename;
+  dirname: typeof pa.dirname;
+}
+```
+
+---
+
+### VMFileSystemInterface
+
+Combines `VMFS` and `VMPath` into a single file system abstraction used by the module resolver. Implement this interface to provide a custom or virtual file system.
+
+```typescript
+export interface VMFileSystemInterface extends VMFS, VMPath {
+  isSeparator(char: string): boolean;
+}
+```
+
+<ParamField path="isSeparator" type="(char: string) => boolean">
+  Returns `true` when the given character is a path separator on the current platform. Equivalent to `char === path.sep`.
+</ParamField>
+
+The concrete `VMFileSystem` class implements this interface using Node's real `fs` and `path` modules:
+
+```typescript
+export class VMFileSystem implements VMFileSystemInterface {
+  constructor(options?: { fs?: VMFS, path?: VMPath });
+}
+```
+
+---
+
+### Resolver
+
+Abstract class representing a compiled module resolver. Instances are created by `makeResolverFromLegacyOptions`—you cannot construct `Resolver` directly.
+
+```typescript
+export abstract class Resolver {
+  private constructor(
+    fs: VMFileSystemInterface,
+    globalPaths: readonly string[],
+    builtins: Map<string, Builtin>
+  );
+}
+```
+
+Pass a `Resolver` instance to `NodeVMOptions.require` to share compiled module state across multiple `NodeVM` instances:
+
+```typescript
+import { NodeVM, makeResolverFromLegacyOptions } from 'vm2';
+import type { Resolver } from 'vm2';
+
+const resolver: Resolver = makeResolverFromLegacyOptions({
+  builtin: ['path'],
+  external: ['lodash'],
+});
+
+const vm = new NodeVM({ require: resolver });
+```

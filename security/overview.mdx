@@ -1,0 +1,128 @@
+---
+title: "How vm2 sandboxes JavaScript code"
+description: "A technical walkthrough of vm2's Proxy membrane, realm separation, code transformer, and the defense principles that keep sandbox code isolated."
+---
+
+vm2 sandboxes untrusted JavaScript by running it inside a separate V8 context while remaining in the **same Node.js process** as your application. The sandbox gets its own set of global intrinsics (`Object`, `Function`, `Array`, `Error`, and so on), but all of these objects live in the same V8 heap as the host's intrinsics. Because there is no process boundary or OS-level privilege separation, the entire security model rests on a carefully constructed JavaScript membrane — a network of Proxies — that mediates every value that crosses between the two worlds.
+
+## Realm separation
+
+V8 calls the pairing of a context and its built-in objects a *realm*. vm2 creates a sandbox realm using Node's built-in `vm` module:
+
+```javascript
+import { VM } from 'vm2';
+
+// The sandbox gets its own Object, Function, Array, etc.
+// but they all live in the same V8 heap as the host's.
+const vm = new VM();
+vm.run('this.constructor.constructor("return process")().exit()');
+// Throws ReferenceError: process is not defined
+```
+
+Compare that with bare Node `vm`, which provides no membrane at all:
+
+```javascript
+import { runInNewContext } from 'node:vm';
+
+runInNewContext('this.constructor.constructor("return process")().exit()');
+// process.exit() runs — the host process terminates
+```
+
+<Info>
+  Realm separation alone is not enough. Host and sandbox share the same V8 isolate and the same thread. If sandbox code can obtain a reference to any host-realm constructor it can evaluate arbitrary code in the host context.
+</Info>
+
+## The Proxy membrane (bridge)
+
+`lib/bridge.js` is the core of vm2. It maintains two WeakMaps:
+
+- **`mappingThisToOther`** — maps host objects to their sandbox proxy wrappers.
+- **`mappingOtherToThis`** — maps sandbox proxies back to the host objects they wrap.
+
+When a host object crosses into the sandbox, the bridge looks it up in `mappingThisToOther`. If the object has already been wrapped, the existing proxy is returned, preserving object identity. If it is new, a proxy is created whose traps sanitize every property access, method call, and prototype traversal.
+
+```javascript
+import { NodeVM } from 'vm2';
+
+const vm = new NodeVM({
+  require: {
+    builtin: ['fs', 'path'],
+  },
+});
+
+// Every object that NodeVM hands to the sandbox is wrapped in a Proxy.
+// The Proxy's get trap intercepts .constructor access and blocks
+// dangerous function constructors from leaking into the sandbox.
+const result = vm.run('module.exports = require("path").join("/a", "b")');
+```
+
+<Note>
+  The proxy invariant problem: each proxy trap is its own attack surface. A gap in any single trap can be an escape route. vm2 must correctly handle attacker-controlled inputs, V8 internal algorithm invocations, and edge cases such as non-configurable properties in every trap.
+</Note>
+
+## The transformer
+
+`lib/transformer.js` uses [Acorn](https://github.com/acornjs/acorn) to parse and instrument sandbox code before execution. Two constructs are targeted:
+
+**`catch` blocks** — Every caught value is passed through `handleException(e)` (defined in `lib/setup-sandbox.js`). This function walks the prototype chain of the caught value and converts any host-realm objects to sandbox proxies. Without this instrumentation, V8 can throw host-realm `TypeError` objects directly into sandbox `catch` clauses, providing a ready-made path to host constructors.
+
+**`with` statements** — Instrumented to prevent scope chain manipulation that could expose the sandbox's global object in a form that leaks host references.
+
+```javascript
+// The transformer rewrites catch blocks so the caught value is sanitized:
+//
+//   try { ... }
+//   catch (e) { handleException(e); ... }
+//
+// If V8's C++ FormatStackTrace throws a host-realm TypeError,
+// handleException intercepts it before sandbox code can see the raw object.
+```
+
+<Warning>
+  The transformer uses Acorn with `ecmaVersion: 2022`. Syntax introduced after ES2022 — notably `using` declarations (ES2024) — is invisible to the transformer. Code using `using` inside `eval()` can bypass catch-block instrumentation entirely.
+</Warning>
+
+## Key defense principles
+
+The bridge and transformer together enforce six principles, drawn from the project's internal security checklist:
+
+1. **Never expose host constructors or prototypes.** The bridge's `get` trap intercepts `.constructor` access on proxied objects and returns an empty object `{}` for dangerous function constructors (`Function`, `AsyncFunction`, `GeneratorFunction`, `AsyncGeneratorFunction`).
+
+2. **Rebound every function crossing the bridge to the destination realm.** A function called in the wrong realm can behave as a host-realm function, leaking its constructor.
+
+3. **Freeze or proxy shared mutable state.** Shared objects that are not frozen can be mutated by sandbox code, poisoning host state.
+
+4. **Use null-prototype objects for internal descriptor operations.** This prevents prototype-pollution attacks from intercepting the bridge's own property-copying logic.
+
+5. **Cache `Reflect.*` and other critical references at initialization time.** If sandbox code can monkey-patch `Reflect.get` before the bridge reads it, it can redirect bridge-internal calls.
+
+6. **Treat every new V8 symbol and language feature as suspect until vetted.** Well-known symbols (`Symbol.species`, `Symbol.hasInstance`, etc.) provide protocol hooks that can override fundamental type checks.
+
+## The escape chain
+
+Every known sandbox escape follows the same progression. Blocking any single step stops the attack; defense in depth means multiple layers must be bypassed simultaneously for a successful escape.
+
+```
+Sandbox Object
+  -> Host Constructor (Function)
+    -> Code Evaluation ("return process")
+      -> process.mainModule.require
+        -> require("child_process")
+          -> execSync("arbitrary command")
+```
+
+The bridge blocks step 1 by intercepting `.constructor` access. The transformer blocks catch-clause access to host errors. Promise sanitization and async controls block asynchronous paths to step 2.
+
+## V8 internal algorithms bypass proxy traps
+
+V8 implements many specification algorithms in C++ — `ArraySpeciesCreate`, `FormatStackTrace`, `PromiseResolveThenableJob`, and others. These C++ routines operate on raw object pointers and **bypass proxy traps entirely** in many cases. When V8's C++ code reads `obj.constructor` for species resolution, it reads the actual property on the underlying object, not the proxy's `get` trap return value.
+
+This means any defense that relies solely on proxy traps is incomplete. vm2 must also neutralize raw objects directly (for example, setting `constructor = undefined` on host arrays before they are handed to the sandbox) and control V8-level hooks such as `Error.prepareStackTrace`.
+
+## Security is maintained through active patching
+
+vm2 is honest that new bypasses will likely be found. The project actively patches reported vulnerabilities and maintains a public record of known issues.
+
+<Note>
+  Subscribe to [GitHub security advisories](https://github.com/patriksimek/vm2/security/advisories) for vm2 to receive notification of new vulnerabilities and fixes as they are released.
+</Note>

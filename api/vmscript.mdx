@@ -1,0 +1,226 @@
+---
+title: "VMScript class reference"
+description: "Complete API reference for VMScript — vm2's precompiled script container that caches compiled code for reuse across multiple VM and NodeVM runs."
+---
+
+`VMScript` wraps a string of source code alongside compilation settings and caches the result so that the same script can be run multiple times without recompiling. The compiled bytecode is not bound to any particular VM; instead it is bound to a context immediately before each run. Use `VMScript` to improve performance when executing the same code in a loop or across multiple sandbox instances.
+
+<Note>
+Code is compiled lazily the first time the script is executed. Call `compile()` explicitly if you want to catch syntax errors at construction time rather than at first run.
+</Note>
+
+## Constructor
+
+`VMScript` has two overloads:
+
+```typescript
+// Overload 1 — explicit path as second argument
+constructor(code: string, path: string, options?: {
+  lineOffset?: number;
+  columnOffset?: number;
+  compiler?: "javascript" | "typescript" | "coffeescript" | CompilerFunction;
+  compilerOptions?: Record<string, any>;
+})
+
+// Overload 2 — options object (filename inside options)
+constructor(code: string, options?: {
+  filename?: string;
+  lineOffset?: number;
+  columnOffset?: number;
+  compiler?: "javascript" | "typescript" | "coffeescript" | CompilerFunction;
+  compilerOptions?: Record<string, any>;
+})
+```
+
+**Throws** `VMError` if the compiler name is unknown.
+
+### Constructor options
+
+<ParamField body="filename" type="string" default='"vm.js"'>
+  The filename shown in stack traces produced by this script. In overload 1, this is the positional `path` argument. In overload 2, it is the `filename` key inside the options object.
+</ParamField>
+
+<ParamField body="lineOffset" type="number" default="0">
+  Line offset applied to stack trace line numbers. Useful when the code string was extracted from a larger file.
+</ParamField>
+
+<ParamField body="columnOffset" type="number" default="0">
+  Column offset applied to stack trace column numbers.
+</ParamField>
+
+<ParamField body="compiler" type='"javascript" | "typescript" | "coffeescript" | CompilerFunction' default='"javascript"'>
+  Compiler to apply to the source before evaluation. When using `"typescript"` or `"coffeescript"`, the corresponding package must be installed. A `CompilerFunction` has the signature `(code: string, filename: string) => string`.
+</ParamField>
+
+<ParamField body="compilerOptions" type="Record<string, any>">
+  Additional options forwarded to the selected compiler.
+</ParamField>
+
+---
+
+## Properties
+
+All properties are **readonly**.
+
+### code
+
+```typescript
+readonly code: string
+```
+
+The source code as it will be compiled (including any prefix/suffix added by the deprecated `wrap()` method). Writable for backwards compatibility only — assigning to it invalidates the compilation cache.
+
+### filename
+
+```typescript
+readonly filename: string
+```
+
+The filename used in stack traces. Defaults to `"vm.js"` when not provided.
+
+### lineOffset
+
+```typescript
+readonly lineOffset: number
+```
+
+Line number offset applied to stack traces. Defaults to `0`.
+
+### columnOffset
+
+```typescript
+readonly columnOffset: number
+```
+
+Column number offset applied to stack traces. Defaults to `0`.
+
+### compiler
+
+```typescript
+readonly compiler: "javascript" | "typescript" | "coffeescript" | CompilerFunction
+```
+
+The compiler specified at construction. Defaults to `"javascript"`.
+
+### compilerOptions
+
+```typescript
+readonly compilerOptions: Record<string, any> | undefined
+```
+
+The compiler options specified at construction, or `undefined` if none were provided.
+
+---
+
+## Methods
+
+### compile()
+
+```typescript
+compile(): this
+```
+
+Triggers compilation immediately. If the script has already been compiled, this is a no-op. Returns `this` for chaining.
+
+Use this to surface `SyntaxError` at a predictable point rather than at first run.
+
+```javascript
+import { VMScript } from 'vm2';
+
+try {
+  const script = new VMScript('function(').compile();
+} catch (err) {
+  console.error('Syntax error:', err.message);
+}
+```
+
+---
+
+### wrap()
+
+```typescript
+/** @deprecated */
+wrap(prefix: string, postfix: string): this
+```
+
+<Warning>
+`wrap()` is deprecated since v3.9.0. Wrap your code string before passing it to the `VMScript` constructor instead.
+</Warning>
+
+Prepends `prefix` and appends `postfix` to the script source. Calling this method invalidates the compilation cache. Returns `this` for chaining.
+
+---
+
+## Code examples
+
+### Basic usage with VM
+
+```javascript
+import { VM, VMScript } from 'vm2';
+
+const vm = new VM();
+const script = new VMScript('Math.random()');
+
+// The script is compiled once on first run, then reused.
+console.log(vm.run(script)); // 0.7341...
+console.log(vm.run(script)); // 0.1829...
+```
+
+### Usage with NodeVM
+
+```javascript
+import { NodeVM, VMScript } from 'vm2';
+
+const vm = new NodeVM();
+const script = new VMScript('module.exports = Math.random()', { filename: 'random.js' });
+
+console.log(vm.run(script)); // 0.5512...
+console.log(vm.run(script)); // 0.8803...
+```
+
+### Explicit compile() for early error detection
+
+```javascript
+import { VM, VMScript } from 'vm2';
+
+// Compile at startup so syntax errors are caught before the first request.
+let script;
+try {
+  script = new VMScript(
+    'module.exports = x => x * 2',
+    { filename: 'double.js' },
+  ).compile();
+} catch (err) {
+  console.error('Failed to compile sandbox script:', err);
+  process.exit(1);
+}
+
+const vm = new VM();
+console.log(vm.run(script)); // undefined (no module.exports in VM context, but code is valid)
+```
+
+### Using a custom compiler
+
+```javascript
+import { VMScript } from 'vm2';
+
+const tsScript = new VMScript(
+  'const greet = (name: string): string => `Hello, ${name}`;',
+  { filename: 'greet.ts', compiler: 'typescript' },
+);
+
+// TypeScript is compiled to JavaScript on first run.
+```
+
+### Enabling accurate stack traces with offsets
+
+```javascript
+import { VMScript } from 'vm2';
+
+// Code extracted from line 10, column 4 of a larger file.
+const script = new VMScript(extractedCode, {
+  filename: 'source-file.js',
+  lineOffset: 10,
+  columnOffset: 4,
+});
+```

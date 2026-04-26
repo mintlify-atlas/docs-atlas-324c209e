@@ -1,0 +1,89 @@
+---
+title: "vm2 security model, sandbox escapes, and limitations"
+description: "vm2 uses in-process Proxy-based sandboxing, not OS-level isolation. Understand the threat model, known limitations, and when vm2 is the right tool to use."
+---
+
+vm2 sandboxes untrusted JavaScript **within the same Node.js process** as your application. It uses a complex network of ES6 Proxies to intercept and mediate every interaction between sandboxed code and the host environment. This approach offers tight integration and fast synchronous communication — but it is fundamentally different from OS-level process isolation, and it comes with limitations you need to understand before deploying vm2 in production.
+
+<Warning>
+  vm2 is not a substitute for OS or container-level isolation. Sandbox escapes are periodically discovered and patched. If you are running code from completely untrusted sources (for example, arbitrary user submissions), use a solution with stronger isolation guarantees.
+</Warning>
+
+## The fundamental challenge
+
+JavaScript is an extraordinarily dynamic language. Objects can be accessed through prototype chains, constructors can be reached via error objects, symbols provide protocol hooks, and async execution creates timing windows. The sheer number of ways to traverse from one object to another in JavaScript makes building an airtight in-process sandbox extremely difficult.
+
+Consider how easily Node's built-in `vm` module can be escaped:
+
+```javascript
+import { runInNewContext } from "node:vm";
+
+runInNewContext('this.constructor.constructor("return process")().exit()');
+console.log('Never gets executed.');
+```
+
+This works because `this.constructor` inside the context reaches the host `Object` constructor, and from there `Function` can be retrieved and called with `"return process"` to leak the host's `process` object.
+
+## What vm2 does
+
+vm2 patches this specific path — and many others — using Proxies:
+
+```javascript
+import { VM } from 'vm2';
+
+new VM().run('this.constructor.constructor("return process")().exit()');
+// Throws ReferenceError: process is not defined
+```
+
+The proxy layer ensures that when sandboxed code accesses `this.constructor`, it gets the sandboxed `Object` constructor, not the host one. Every value crossing the sandbox boundary is wrapped so that property access, prototype traversal, and function calls are all mediated.
+
+vm2 also instruments `catch` blocks and `with` statements using an Acorn-based code transformer, and it overrides `require` in `NodeVM` sandboxes to enforce your module allowlist.
+
+## Known limitations
+
+Despite vm2's protections, several limitations remain in the current version:
+
+- **Class inheritance from proxied classes is not possible.** You cannot define a class that extends a proxied class, including using a proxied class in `Object.create`.
+- **Direct `eval` does not work** inside the sandbox.
+- **Logging sandbox arrays** will repeat the array part in the properties.
+- **Source code transformations** can produce a different source string for a function.
+- **There are ways to crash the Node.js process** from inside the sandbox. vm2 does not protect against denial-of-service via process crashes.
+
+In addition, vm2's code transformer uses `ecmaVersion: 2022`, so post-ES2022 syntax (such as `using` declarations) is not instrumented and may bypass certain defenses.
+
+<Note>
+  New escape techniques are periodically discovered by security researchers. Check the [GitHub security advisories](https://github.com/patriksimek/vm2/security/advisories) for disclosed vulnerabilities and applied patches.
+</Note>
+
+## When vm2 is appropriate
+
+vm2 can be a suitable choice when:
+
+- You need tight integration with host objects and fast synchronous communication between sandbox and host.
+- The untrusted code comes from a relatively trusted source — for example, internal tooling or a plugin system with vetted authors.
+- You combine vm2 with other security layers such as network isolation, filesystem restrictions, and resource limits.
+- You accept the risk and actively monitor for security updates.
+
+## Alternatives
+
+If you require stronger isolation guarantees, these alternatives provide true process or hardware-level isolation:
+
+| Solution | Approach | Performance | Trade-offs |
+|---|---|---|---|
+| **[isolated-vm](https://github.com/laverdet/isolated-vm)** | Separate V8 isolates (different V8 heap) | Fast | In maintenance mode; requires manual V8 updates |
+| **Separate process / Worker** | `child_process` or Worker threads with limited permissions | Medium | Higher IPC overhead; data must be serialized |
+| **Containers / VMs** | Docker, gVisor, Firecracker | Slow | Startup overhead; resource-heavy |
+| **Managed services** | Cloud-based code execution (e.g., AWS Lambda, Cloudflare Workers) | Variable | Network latency; external dependency |
+
+## Staying secure
+
+If you use vm2, follow these practices:
+
+1. **Keep vm2 updated.** Security fixes are applied to the `3.x` release line. Older versions (`2.x` and earlier) are no longer supported.
+2. **Subscribe to security advisories.** Watch the repository on GitHub and enable security advisory notifications so you are alerted when new vulnerabilities are disclosed.
+3. **Use defense in depth.** Do not rely on vm2 as your only line of defense. Combine it with network isolation, filesystem restrictions, and resource limits appropriate to your threat model.
+4. **Do not allow unnecessary modules.** In `NodeVM`, every module you allow in `require.builtin` or `require.external` expands the attack surface. Grant only what the sandboxed code actually needs.
+
+<Info>
+  To report a security vulnerability, use [GitHub's private vulnerability reporting](https://github.com/patriksimek/vm2/security/advisories/new). Do not open a public issue. See the full [security policy](https://github.com/patriksimek/vm2/blob/resurrection/SECURITY.md) for the disclosure process.
+</Info>

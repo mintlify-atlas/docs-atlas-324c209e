@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "vm2",
+  "projectType": "sdk-library",
+  "projectName": "vm2",
+  "projectDescription": "A secure sandbox for running untrusted JavaScript code within a Node.js process using Proxy-based isolation.",
   "theme": "luma",
-  "colors": {
-    "primary": "#848486",
-    "light": "#15151d",
-    "dark": "#bcbbbc"
-  },
-  "favicon": "https://media.brand.dev/5183f067-8052-4641-90e9-736a25761f70.svg",
-  "logo": {
-    "light": "https://media.brand.dev/fd3d2f76-e0b5-403b-b8cd-919bf709cd95.png",
-    "dark": "https://media.brand.dev/fd3d2f76-e0b5-403b-b8cd-919bf709cd95.png"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/patriksimek/vm2"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/patriksimek/vm2"
-    }
-  },
+  "primaryColor": "#848486",
+  "lightColor": "#15151d",
+  "darkColor": "#bcbbbc",
   "navigation": {
     "tabs": [
       {
@@ -60,5 +43,25 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Runs untrusted JavaScript code safely in the same Node.js process",
+    "Proxy-based isolation preventing sandbox escapes",
+    "Fine-grained module access control (builtin and external)",
+    "Console redirection and sandboxed process environment",
+    "Support for TypeScript and CoffeeScript transpilation",
+    "VMScript precompilation for performance",
+    "Read-only (freeze) and protected object APIs",
+    "Cross-sandbox object identity preservation",
+    "CLI tool for running scripts in a NodeVM sandbox"
+  ],
+  "publicApiSurface": [
+    "VM",
+    "NodeVM",
+    "VMScript",
+    "VMFileSystem",
+    "VMError",
+    "Resolver",
+    "makeResolverFromLegacyOptions"
+  ]
 }

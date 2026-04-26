@@ -1,0 +1,174 @@
+---
+title: 'The Sandbox Global Object'
+description: 'Control what sandboxed code can see as global variables. Learn how to pass objects in, read globals out, and maintain object identity across the boundary.'
+---
+
+Every `VM` and `NodeVM` instance has a sandbox — an isolated global object that acts as the `globalThis` for code running inside it. Whatever properties exist on this object are visible to sandboxed code as global variables. By default the sandbox contains only JavaScript built-ins (plus `Buffer` for `VM`). You control everything else: which objects are available, what they are named, and whether they can be modified.
+
+## Passing objects into a sandbox
+
+The simplest way to inject values is the `sandbox` constructor option. Every own property of the object you provide is copied into the sandbox global at construction time:
+
+```javascript sandbox-option.js
+import { VM } from 'vm2';
+
+const vm = new VM({
+  sandbox: {
+    greeting: 'Hello',
+    add: (a, b) => a + b,
+  },
+});
+
+vm.run('console.log(greeting)');     // Hello (if console is available)
+vm.run('add(1, 2)');                 // returns 3
+```
+
+Values passed through `sandbox` are proxied across the host/sandbox boundary. The sandboxed code interacts with them through vm2's proxy layer, which enforces isolation while preserving object identity (see [Cross-sandbox relationships](#cross-sandbox-relationships) below).
+
+## Managing globals after construction
+
+You are not limited to the `sandbox` constructor option. `VM` and `NodeVM` both expose methods for reading and writing globals dynamically.
+
+### `setGlobals(values)`
+
+Copies all own properties of `values` into the sandbox global object. Useful for batch injection after construction. Returns `this` for chaining.
+
+```typescript
+setGlobals(values: any): this
+```
+
+```javascript set-globals.js
+import { VM } from 'vm2';
+
+const vm = new VM();
+vm.setGlobals({
+  PI: Math.PI,
+  square: (x) => x * x,
+});
+
+vm.run('square(PI)'); // ~9.869...
+```
+
+### `setGlobal(name, value)`
+
+Sets a single global in the sandbox by name. Returns `this` for chaining.
+
+```typescript
+setGlobal(name: string, value: any): this
+```
+
+```javascript set-global.js
+import { VM } from 'vm2';
+
+const vm = new VM();
+vm.setGlobal('version', '1.0.0');
+vm.run('version'); // returns '1.0.0'
+```
+
+### `getGlobal(name)`
+
+Reads a global from the sandbox by name. Useful for retrieving values that sandboxed code has written to global scope.
+
+```typescript
+getGlobal(name: string): any
+```
+
+```javascript get-global.js
+import { VM } from 'vm2';
+
+const vm = new VM();
+vm.run('result = 42');
+vm.getGlobal('result'); // returns 42
+```
+
+<Tip>
+  `vm.sandbox` gives you direct access to the proxied global object. Reading or writing properties on it has the same effect as calling `getGlobal` and `setGlobal`.
+</Tip>
+
+## Cross-sandbox relationships
+
+When you pass an object into the sandbox, vm2 preserves its identity across the host/sandbox boundary. The same host object is accessible from both sides, and prototype chain checks (`instanceof`, `__proto__`) work correctly in either direction:
+
+```javascript cross-sandbox.js
+const assert = require('assert');
+const { VM } = require('vm2');
+
+const sandbox = {
+  object: new Object(),
+  func: new Function(),
+  buffer: new Buffer([0x01, 0x05]),
+};
+
+const vm = new VM({ sandbox });
+
+// Object identity is preserved
+assert.ok(vm.run(`object`) === sandbox.object);
+assert.ok(vm.run(`object instanceof Object`));
+assert.ok(vm.run(`object`) instanceof Object);
+assert.ok(vm.run(`object.__proto__ === Object.prototype`));
+assert.ok(vm.run(`object`).__proto__ === Object.prototype);
+
+// Functions can be called and instantiated from both sides
+assert.ok(vm.run(`func`) === sandbox.func);
+assert.ok(vm.run(`func instanceof Function`));
+assert.ok(vm.run(`func`) instanceof Function);
+assert.ok(vm.run(`func.__proto__ === Function.prototype`));
+assert.ok(vm.run(`func`).__proto__ === Function.prototype);
+
+assert.ok(vm.run(`new func() instanceof func`));
+assert.ok(vm.run(`new func()`) instanceof sandbox.func);
+assert.ok(vm.run(`new func().__proto__ === func.prototype`));
+assert.ok(vm.run(`new func()`).__proto__ === sandbox.func.prototype);
+
+// Buffers and their derived slices are recognized correctly
+assert.ok(vm.run(`buffer`) === sandbox.buffer);
+assert.ok(vm.run(`buffer instanceof Buffer`));
+assert.ok(vm.run(`buffer`) instanceof Buffer);
+assert.ok(vm.run(`buffer.__proto__ === Buffer.prototype`));
+assert.ok(vm.run(`buffer`).__proto__ === Buffer.prototype);
+assert.ok(vm.run(`buffer.slice(0, 1) instanceof Buffer`));
+assert.ok(vm.run(`buffer.slice(0, 1)`) instanceof Buffer);
+```
+
+This identity preservation is implemented through vm2's paired proxy system in `lib/bridge.js`. Each value crossing the boundary gets a proxy on the other side, and a `WeakMap` cache ensures the same proxy is returned for the same underlying object on every subsequent crossing.
+
+<Tip>
+  Because object identity is preserved, you can pass callback functions, event emitters, or shared state objects into the sandbox and interact with them naturally from the host side after the sandboxed code has run.
+</Tip>
+
+## Controlling mutability: freeze and protect
+
+By default, sandboxed code can modify objects you pass in through the sandbox. If you pass in a utilities object, a sandboxed script could overwrite its methods. vm2 provides two mechanisms to prevent this.
+
+### `freeze(object, name?)`
+
+Makes the object read-only inside the sandbox. Sandboxed code cannot add, change, or delete any of its properties. Frozen objects are affected deeply. Optionally registers the object as a global under `name`.
+
+```javascript freeze-example.js
+import { VM } from 'vm2';
+
+const util = {
+  add: (a, b) => a + b,
+};
+
+// Without freeze — sandbox can overwrite methods
+const vm1 = new VM({ sandbox: { util } });
+vm1.run('util.add = (a, b) => a - b');
+console.log(util.add(1, 1)); // returns 0
+
+// With freeze — sandbox cannot modify the object
+const vm2 = new VM();
+vm2.freeze(util, 'util'); // second argument adds it to global
+vm2.run('util.add = (a, b) => a - b'); // fails silently in non-strict mode
+console.log(util.add(1, 1)); // returns 2
+```
+
+### `protect(object, name?)`
+
+Unlike `freeze`, `protect` allows sandboxed code to add, change, or delete plain data properties. The restriction is that sandboxed code cannot set function values as properties. This prevents a script from replacing methods like `toJSON`, `toString`, or `inspect` with malicious functions.
+
+For full details on both mechanisms, see [Read-only and protected objects](/guides/read-only-protected).
+
+<Warning>
+  Neither `freeze()` nor `protect()` can be applied to objects that have already been proxied into the VM. Call these methods before passing the object into the sandbox, or use them together with the `name` parameter to register the object as a global in one step.
+</Warning>

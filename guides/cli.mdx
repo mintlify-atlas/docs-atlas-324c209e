@@ -1,0 +1,80 @@
+---
+title: "Running scripts with the vm2 CLI"
+description: "Use the vm2 command-line tool to run a Node.js script inside a NodeVM sandbox with all external modules enabled and verbose timing logs."
+---
+
+vm2 includes a command-line interface for running scripts directly inside a `NodeVM` sandbox without writing any host code. The CLI is useful for testing whether a script behaves correctly under sandbox constraints, or for quick one-off executions where you want external module access but do not need to configure the sandbox programmatically.
+
+## Installation
+
+Install vm2 globally to make the `vm2` command available system-wide:
+
+```bash
+npm install vm2 -g
+```
+
+Alternatively, run it without a global install using `npx`:
+
+```bash
+npx vm2 ./script.js
+```
+
+## Usage
+
+```bash
+vm2 ./script.js
+```
+
+Pass the path to the script you want to run as the only argument. The CLI resolves the path to an absolute path and runs the file using `NodeVM.file()`.
+
+## What the CLI does
+
+The CLI creates a `NodeVM` with `external: true`, which allows the script to require any installed npm package. It then runs the file and prints timing and error information with coloured output:
+
+- Before running: prints `[vm] creating VM for <absolute-path>` in grey
+- On success: prints `[vm] VM completed in Xms` in grey
+- On `VMError`: prints `[vm:error] <message>` in red
+- On any other error: prints `[vm:error] <stack>` in red (or the error value if no stack is available)
+
+## Example
+
+```bash
+vm2 ./script.js
+```
+
+```
+[vm] creating VM for /home/user/project/script.js
+[vm] VM completed in 12ms
+```
+
+If the script throws an error:
+
+```
+[vm] creating VM for /home/user/project/script.js
+[vm:error] TypeError: Cannot read properties of undefined
+    at Object.<anonymous> (script.js:4:10)
+```
+
+## Local vs global install
+
+If vm2 is installed locally (without `-g`), the `vm2` binary is available in `./node_modules/.bin/vm2`. You can run it with:
+
+```bash
+./node_modules/.bin/vm2 ./script.js
+```
+
+Or add it to the `scripts` section of your `package.json`:
+
+```json
+{
+  "scripts": {
+    "sandbox": "vm2 ./script.js"
+  }
+}
+```
+
+Then run it with `npm run sandbox`.
+
+<Tip>
+  The CLI is a convenient way to verify that a script works inside a sandbox before integrating it with `NodeVM` in your application code. Because it runs with `external: true`, it does not enforce module allowlists — use it for development and testing, not for running untrusted code in production.
+</Tip>
